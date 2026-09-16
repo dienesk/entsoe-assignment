@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars and adjust as needed. Every value here has a
+# default in variables.tf; this file only needs to override what you want
+# to change.
+
+aws_region  = "eu-central-1"
+project     = "entsoe-scraper"
+environment = "dev"
+
+availability_zones = ["eu-central-1a", "eu-central-1b"]
+
+# Keep fck-nat as a single instance (cheaper) unless you need HA egress.
+fck_nat_ha_mode = false
+
+# Per-endpoint schedules; anything not listed here falls back to
+# default_schedule_expression. Keys must match filenames under
+# lambda/config/endpoints/ (without the .json extension).
+endpoint_schedules = {
+  generation_forecast_day_ahead = "cron(0 17 * * ? *)"
+  generation_actual_per_unit    = "cron(3 0 * * ? *)"
+}

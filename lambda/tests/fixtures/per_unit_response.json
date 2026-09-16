@@ -1,0 +1,84 @@
+{
+  "uuAppErrorMap": {},
+  "dataViewCode": "GUI_GENERATION_PER_UNIT",
+  "instanceList": [
+    {
+      "timeInterval": { "from": "2025-12-31T23:00:00Z", "to": "2026-01-01T23:00:00Z" },
+      "businessDimensionMap": {
+        "PRODUCTION_TYPE": "B14",
+        "GENERATION_UNIT": "24WG--EMOG31---P",
+        "AREA": "CTA|10YSK-SEPS-----K"
+      },
+      "instanceAttributeMap": { "COMPOSITE_EIC": "24WG--EMOG31---P:0" },
+      "curveData": {
+        "curveType": "A01",
+        "pointAttributeVariabilityMap": {
+          "ACTUAL_GENERATION_OUTPUT": false,
+          "ACTUAL_CONSUMPTION": false,
+          "GENERATION": null,
+          "CONSUMPTION": null
+        },
+        "periodList": [
+          {
+            "timeInterval": { "from": "2025-12-31T23:00:00Z", "to": "2026-01-01T00:00:00Z" },
+            "resolution": "PT60M",
+            "pointMap": { "0": [{ "alt": "n/e" }, { "alt": "n/e" }] }
+          }
+        ],
+        "curvePageInfo": { "pageIndex": 0, "pageSize": 1, "total": 1, "totalSize": 1 }
+      },
+      "storageInfo": {
+        "storedTime": null,
+        "instanceCode": [
+          "ACTUAL_GENERATION_OUTPUT_PER_UNIT_R3___24WG--EMOG31---P",
+          "ACTUAL_GENERATION_OUTPUT_PER_UNIT_R3___24WG--EMOG31---P"
+        ],
+        "publicationState": null,
+        "version": null,
+        "valueSource": null,
+        "curveId": null,
+        "timeZone": "EET",
+        "artificial": false
+      }
+    },
+    {
+      "timeInterval": { "from": "2025-12-31T23:00:00Z", "to": "2026-01-01T23:00:00Z" },
+      "businessDimensionMap": {
+        "PRODUCTION_TYPE": "B02",
+        "GENERATION_UNIT": "24WG--ENOG03---O",
+        "AREA": "CTA|10YSK-SEPS-----K"
+      },
+      "instanceAttributeMap": { "COMPOSITE_EIC": "24WG--ENOG03---O:0" },
+      "curveData": {
+        "curveType": "A01",
+        "pointAttributeVariabilityMap": {
+          "ACTUAL_GENERATION_OUTPUT": false,
+          "ACTUAL_CONSUMPTION": false,
+          "GENERATION": null,
+          "CONSUMPTION": null
+        },
+        "periodList": [
+          {
+            "timeInterval": { "from": "2025-12-31T23:00:00Z", "to": "2026-01-01T00:00:00Z" },
+            "resolution": "PT60M",
+            "pointMap": { "0": [{ "alt": "N/A" }, { "alt": "N/A" }] }
+          }
+        ],
+        "curvePageInfo": { "pageIndex": 0, "pageSize": 1, "total": 1, "totalSize": 1 }
+      },
+      "storageInfo": {
+        "storedTime": null,
+        "instanceCode": [
+          "ACTUAL_GENERATION_OUTPUT_PER_UNIT_R3___24WG--ENOG03---O",
+          "ACTUAL_GENERATION_OUTPUT_PER_UNIT_R3___24WG--ENOG03---O"
+        ],
+        "publicationState": null,
+        "version": null,
+        "valueSource": null,
+        "curveId": null,
+        "timeZone": "EET",
+        "artificial": false
+      }
+    }
+  ]
+}

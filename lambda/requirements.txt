@@ -1,0 +1,4 @@
+# Runtime dependencies: none beyond the Python standard library and boto3,
+# which is preinstalled in the AWS Lambda Python runtime. This file covers
+# local development and testing only.
+pytest>=8.0

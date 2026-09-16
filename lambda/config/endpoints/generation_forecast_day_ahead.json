@@ -1,0 +1,28 @@
+{
+  "endpoint_name": "generation_forecast_day_ahead",
+  "description": "Day-ahead total generation forecast for the Slovak (SEPS) control area. Source page: https://iop-transparency.entsoe.eu/generation/forecast/dayAhead",
+  "method": "POST",
+  "url": "https://iop-transparency.entsoe.eu/generation/forecast/dayAhead/load",
+  "timezone": "CET",
+  "date_offset_days": 1,
+  "s3_prefix": "generation/forecast/day-ahead",
+  "_request_template_note": "BEST-EFFORT PLACEHOLDER. We could not capture the browser's real POST body for this endpoint (see root README 'A note on request templates'). Before first deploy, open the source page above with DevTools Network open, find the POST to '.../load', copy its exact Payload, and replace request_template below with it -- keeping the {datetime_from}/{datetime_to}/{timezone} placeholders in place of the concrete dates the browser sent.",
+  "request_template": {
+    "dataViewCode": "GUI_TOTAL_GENERATION_FORECAST",
+    "businessDimensionMap": {
+      "AREA": "CTA|10YSK-SEPS-----K"
+    },
+    "intervalCriteria": {
+      "timeInterval": {
+        "from": "{datetime_from}",
+        "to": "{datetime_to}"
+      },
+      "resolution": "PT60M"
+    },
+    "timeZone": "{timezone}",
+    "pageInfo": {
+      "pageIndex": 0,
+      "pageSize": 2147483647
+    }
+  }
+}
