@@ -20,7 +20,7 @@ EventBridge (1 schedule per endpoint config)
  iop-transparency.entsoe.eu
         │  JSON response
         ▼
-   generic flattener  ──► CSV + raw JSON  ──►  S3 bucket
+     data_processor   ──► CSV + raw JSON  ──►  S3 bucket
 ```
 
 - **Lambda** (`lambda/src/`) — Python 3.13, standard library + `boto3` only
@@ -41,14 +41,24 @@ EventBridge (1 schedule per endpoint config)
 
 ## Why a "generic" scraper, and what that means concretely
 
-The two endpoints named in the task (day-ahead generation forecast, actual
-generation per unit) are two different reports on the same platform, and
-both return the same JSON envelope shape (`instanceList[].businessDimensionMap`
-+ `curveData.periodList[].pointMap`, confirmed by inspecting real traffic
-from both source pages — see "What I verified" below). Two design decisions
-follow directly from that:
+The task asks for day-ahead generation forecast to be scraped, and for
+adding the actual-generation-per-unit endpoint later to be a matter of
+configuration rather than code. So day-ahead is the only *live* config;
+per-unit ships pre-written and verified under
+`lambda/config/endpoints/examples/`, and is enabled by moving one file (see
+"Adding a new endpoint"). It isn't live by default simply because the task
+only asked for day-ahead to be scraped, and every live config file becomes a
+scheduled job that costs requests and storage.
 
-1. **[`lambda/src/flattener.py`](lambda/src/flattener.py)** doesn't hard-code
+That split works because the two are different reports on the same platform
+returning the same JSON envelope shape
+(`instanceList[].businessDimensionMap` + `curveData.periodList[].pointMap`),
+confirmed by inspecting real traffic from both source pages — the captured
+per-unit response is kept as a test fixture precisely so the processing code
+is proven against a second, differently-shaped report. Two design decisions
+follow from that:
+
+1. **[`lambda/src/data_processor.py`](lambda/src/data_processor.py)** doesn't hard-code
    column names. It derives dimension columns from whatever keys are in
    `businessDimensionMap`, and metric columns from whatever keys are in
    `pointAttributeVariabilityMap`, so if ENTSO-E adds/renames a dimension or
@@ -74,31 +84,50 @@ the page actually issues a `POST` to a companion endpoint:
 | `.../generation/forecast/dayAhead` | `POST https://iop-transparency.entsoe.eu/generation/forecast/dayAhead/load` |
 | `.../generation/actual/perUnit` | `POST https://iop-transparency.entsoe.eu/generation/actual/perUnit/loadOverview` |
 
-I captured and verified the **response** shape from both (see
-`lambda/tests/fixtures/*.json` — real, only lightly trimmed). I could not
-recover the exact **request** body the browser sends — it's not exposed by
-response inspection, and a couple of attempts to reconstruct it by informed
-guesswork returned a generic `500 internalServerError` rather than a useful
-validation error (I did confirm no authentication is required: an
-unauthenticated `GET` gets a clean `405 invalidInvocationMethod` from the
-app layer, not a 401/403). So `request_template` in each shipped config file
-is a **best-effort placeholder**, clearly flagged with a `_request_template_note`
-field in the JSON — **you must capture the real payload before first
-deploy**:
+There is no published schema for these endpoints, so the request body was
+recovered from the platform's own frontend: its webpack bundle ships
+**inline sourcemaps**, so the original source can be read directly. The
+authoritative builder is `getDtoInByOptions()` in
+`core/contexts/data-view-data-context-provider.js`, which assembles every
+data view's request identically:
 
-1. Open the source page (e.g. the day-ahead URL from the task) with your
-   browser's DevTools Network tab open.
-2. Let the page load; find the `POST` request to the `/load` (or
-   `/loadOverview`) endpoint.
-3. Copy its request payload.
-4. Paste it into `request_template` in the matching config file, replacing
-   the concrete date values the browser sent with the literal strings
-   `{datetime_from}` and `{datetime_to}` (UTC instants, e.g.
-   `2025-12-31T23:00:00Z`) and `{timezone}` where the timezone code appears.
+```json
+{
+  "dateTimeRange": { "from": "2025-12-31T23:00:00Z", "to": "2026-01-01T23:00:00Z" },
+  "areaList":      ["CTA|10YSK-SEPS-----K"],
+  "timeZone":      "CET",
+  "sorterList":    [],
+  "intervalPageInfo": { "itemIndex": 0, "pageSize": 100 }
+}
+```
 
-If the template is wrong, the Lambda's CloudWatch Logs will show either an
+Both endpoints were then verified live: day-ahead returns `200` with 24
+hourly points, per-unit returns `200` with 23 generation units. Because
+*every* data view uses this one builder, the same template shape works for
+any report on the platform — which is what makes the config-only
+extensibility real rather than aspirational.
+
+Three findings worth knowing before you add an endpoint:
+
+- **`areaList` is a list** of `"<AREA_TYPE>|<EIC>"` strings, not the
+  `businessDimensionMap` object that appears in the *response*. Request and
+  response shapes differ; don't infer one from the other.
+- **The WAF blocks `2147483647`.** The platform sits behind a Microsoft
+  Azure Application Gateway that rejects that exact literal (`Integer.MAX_VALUE`)
+  anywhere in the body with a `403 Forbidden` HTML page, as an
+  integer-overflow attack signature. `2147483646` passes. Keep `pageSize`
+  well below it — this costs hours to diagnose, because the 403 arrives
+  before the application and looks nothing like an application error. There
+  is a regression test pinning this.
+- **Per-unit posts to `/loadOverview`**, not `/load`. Most report endpoints
+  use `/load`; check the frontend's `calls` module for the exact command URI.
+
+No authentication is required: an unauthenticated `GET` gets a clean
+`405 invalidInvocationMethod` from the app layer, not a 401/403.
+
+If a template is ever wrong, the Lambda's CloudWatch Logs show either the
 HTTP error or the API's `uuAppErrorMap` verbatim (see
-[`data_processor.py`](lambda/src/data_processor.py)) — it's designed to fail
+[`api_client.py`](lambda/src/api_client.py)) — it's designed to fail
 loudly and specifically rather than silently write an empty CSV.
 
 ## Repository layout
@@ -129,10 +158,8 @@ terraform plan
 terraform apply
 ```
 
-First-time setup: before `apply`, follow "What I verified... one important
-caveat" above to replace the placeholder `request_template` in
-`lambda/config/endpoints/*.json` with a real captured payload for each
-endpoint you want working data from.
+No pre-deploy steps needed: the shipped day-ahead config is verified against
+the live endpoint and returns real data as-is.
 
 Smoke test after apply:
 ```bash
@@ -148,18 +175,54 @@ To tear everything down: `terraform destroy` (from `terraform/`).
 
 ## Adding a new endpoint
 
-1. Capture the endpoint's request payload from DevTools (see above).
+Any `*.json` file directly inside `lambda/config/endpoints/` is a live
+endpoint: Terraform discovers it and creates its SSM parameter, EventBridge
+rule and invoke permission automatically. Files in
+`lambda/config/endpoints/examples/` are deliberately **not** discovered
+(the discovery glob is non-recursive), so an example can sit there ready to
+use without deploying a job.
+
+### Turning on actual generation per unit
+
+This is the endpoint the task asks to be addable by configuration, and it
+ships pre-written as an example — enabling it is a file move plus an apply,
+with no code change:
+
+```bash
+mv lambda/config/endpoints/examples/generation_actual_per_unit.json \
+   lambda/config/endpoints/
+terraform -chdir=terraform apply
+```
+
+Its `request_template` is already verified against the live endpoint (200,
+23 generation units), so no payload capture is needed. Optionally add a
+schedule for it to `endpoint_schedules` in `terraform.tfvars`; otherwise it
+inherits `default_schedule_expression`.
+
+`lambda/tests/test_endpoint_extensibility.py` pins this path: it checks the
+example config validates, drives the API client, and processes that
+endpoint's captured response — all without touching application code.
+
+### Any other endpoint
+
+1. Find the endpoint's command URI in the frontend's `calls` module (e.g.
+   `generation/forecast/windAndSolar/solar/load`) — or read it off the
+   Network tab. The request body shape is the same for all of them.
 2. Create `lambda/config/endpoints/<new_endpoint_name>.json` following the
-   schema of the existing two files (`endpoint_name`, `method`, `url`,
-   `timezone`, `date_offset_days`, `request_template`, `s3_prefix`).
-3. Optionally add a schedule override for it to `endpoint_schedules` in
-   `terraform.tfvars` (otherwise it gets `default_schedule_expression`).
+   schema of `generation_forecast_day_ahead.json` (`endpoint_name`,
+   `method`, `url`, `timezone`, `date_offset_days`, `request_template`,
+   `s3_prefix`). An "actuals"-style endpoint wants a negative
+   `date_offset_days` so each run collects the day that just finished.
+3. Optionally add a schedule override to `endpoint_schedules` in
+   `terraform.tfvars`.
 4. `terraform apply`.
 
 No Python or Terraform code changes are needed as long as the new endpoint
-returns the same `instanceList`/`curveData`/`pointMap` envelope as the two
-shipped endpoints — which holds for every report on this platform that uses
-the same underlying uuApp business-report component.
+returns the same `instanceList`/`curveData`/`pointMap` envelope — which
+holds for every report on this platform built on the same uuApp
+business-report component. `lambda/tests/` includes a captured per-unit
+response as a fixture, so the processing code is already proven against
+that endpoint's differently-shaped payload.
 
 ## Local development
 

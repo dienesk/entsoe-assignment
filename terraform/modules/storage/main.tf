@@ -1,6 +1,6 @@
 # Private, encrypted, versioned bucket holding the scraped CSVs (kept
 # indefinitely) and the raw JSON responses (expired after N days -- they
-# exist to allow reprocessing if the flattening logic changes, not as a
+# exist to allow reprocessing if the processing logic changes, not as a
 # permanent archive).
 
 resource "aws_s3_bucket" "output" {
@@ -42,7 +42,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "output" {
 resource "aws_s3_bucket_lifecycle_configuration" "output" {
   bucket = aws_s3_bucket.output.id
 
-  # Raw JSON responses are kept only so a changed flattener can reprocess
+  # Raw JSON responses are kept only so changed processing logic can reprocess
   # them, so they age out; the flattened CSVs are kept indefinitely. The
   # Lambda writes raw payloads under a single top-level "raw/" prefix
   # (lambda/src/csv_writer.py::build_s3_key) precisely so this rule can

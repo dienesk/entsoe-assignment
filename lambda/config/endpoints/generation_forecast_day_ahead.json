@@ -6,23 +6,22 @@
   "timezone": "CET",
   "date_offset_days": 1,
   "s3_prefix": "generation/forecast/day-ahead",
-  "_request_template_note": "BEST-EFFORT PLACEHOLDER. We could not capture the browser's real POST body for this endpoint (see root README 'A note on request templates'). Before first deploy, open the source page above with DevTools Network open, find the POST to '.../load', copy its exact Payload, and replace request_template below with it -- keeping the {datetime_from}/{datetime_to}/{timezone} placeholders in place of the concrete dates the browser sent.",
+  "_areas_note": "Countries / control areas to scrape, as '<AREA_TYPE>|<EIC>' strings. Add more entries to cover more countries in the same run -- each one becomes its own set of rows, distinguished by the dim_AREA column. Verified example: 'CTA|10YCZ-CEPS-----N' (Czechia), 'CTA|10YAT-APG------L' (Austria).",
+  "areas": [
+    "CTA|10YSK-SEPS-----K"
+  ],
+  "_request_template_note": "Verified against the live endpoint (HTTP 200). The schema was recovered from the platform's own webpack sourcemaps: see getDtoInByOptions() in core/contexts/data-view-data-context-provider.js, which builds exactly {dateTimeRange, areaList, timeZone, sorterList, intervalPageInfo}. Two gotchas: areaList is a LIST of 'AREATYPE|EIC' strings, and the WAF rejects the literal 2147483647 (Integer.MAX_VALUE) anywhere in the body with a 403, so keep pageSize well below it.",
   "request_template": {
-    "dataViewCode": "GUI_TOTAL_GENERATION_FORECAST",
-    "businessDimensionMap": {
-      "AREA": "CTA|10YSK-SEPS-----K"
+    "dateTimeRange": {
+      "from": "{datetime_from}",
+      "to": "{datetime_to}"
     },
-    "intervalCriteria": {
-      "timeInterval": {
-        "from": "{datetime_from}",
-        "to": "{datetime_to}"
-      },
-      "resolution": "PT60M"
-    },
+    "areaList": "{areas}",
     "timeZone": "{timezone}",
-    "pageInfo": {
-      "pageIndex": 0,
-      "pageSize": 2147483647
+    "sorterList": [],
+    "intervalPageInfo": {
+      "itemIndex": 0,
+      "pageSize": 100
     }
   }
 }

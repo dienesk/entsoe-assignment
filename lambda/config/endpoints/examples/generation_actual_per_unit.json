@@ -1,0 +1,26 @@
+{
+  "endpoint_name": "generation_actual_per_unit",
+  "description": "Actual generation output per generation unit for the Slovak (SEPS) control area. Source page: https://iop-transparency.entsoe.eu/generation/actual/perUnit",
+  "method": "POST",
+  "url": "https://iop-transparency.entsoe.eu/generation/actual/perUnit/loadOverview",
+  "timezone": "CET",
+  "date_offset_days": -1,
+  "s3_prefix": "generation/actual/per-unit",
+  "_request_template_note": "Verified against the live endpoint (HTTP 200, 23 generation units returned). Note the URL ends in /loadOverview, not /load -- per-unit is the exception; most report endpoints use /load. The request schema is identical to day-ahead's because every data view on the platform builds its request through the same helper.",
+  "areas": [
+    "CTA|10YSK-SEPS-----K"
+  ],
+  "request_template": {
+    "dateTimeRange": {
+      "from": "{datetime_from}",
+      "to": "{datetime_to}"
+    },
+    "areaList": "{areas}",
+    "timeZone": "{timezone}",
+    "sorterList": [],
+    "intervalPageInfo": {
+      "itemIndex": 0,
+      "pageSize": 100
+    }
+  }
+}

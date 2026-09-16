@@ -11,6 +11,8 @@ those bounds — correctly across DST — is the interesting part.
 
 from __future__ import annotations
 
+import re
+from calendar import monthrange
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -40,13 +42,45 @@ def format_utc_instant(instant: datetime) -> str:
     return instant.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def parse_iso8601_duration_minutes(duration: str) -> int:
-    """Parse the small subset of ISO-8601 durations this API emits (e.g. PT60M, PT30M, PT15M).
+# Note the two different meanings of "M": months before the T separator,
+# minutes after it. Endpoints on this platform range from PT15M (intraday)
+# to P1Y (installed capacity), so the parser has to span both.
+_DURATION_PATTERN = re.compile(
+    r"^P(?!$)(?:(?P<years>\d+)Y)?(?:(?P<months>\d+)M)?(?:(?P<days>\d+)D)?"
+    r"(?:T(?!$)(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?$"
+)
 
-    Deliberately narrow: raises ValueError on anything else rather than
-    guessing, since a silently-wrong resolution would corrupt every
-    timestamp in the output.
+
+def parse_iso8601_duration(duration: str) -> dict[str, int]:
+    """Parse an ISO-8601 duration into its components.
+
+    Raises ValueError on anything unrecognized rather than guessing, since a
+    silently-wrong resolution would corrupt every timestamp in the output.
     """
-    if not duration.startswith("PT") or not duration.endswith("M"):
+    match = _DURATION_PATTERN.match(duration)
+    if not match:
         raise ValueError(f"Unsupported resolution format: {duration!r}")
-    return int(duration[2:-1])
+    return {unit: int(value or 0) for unit, value in match.groupdict().items()}
+
+
+def shift_by_duration(instant: datetime, duration: dict[str, int], multiplier: int) -> datetime:
+    """Advance ``instant`` by ``multiplier`` whole ``duration`` steps.
+
+    Years and months need calendar arithmetic rather than a fixed timedelta,
+    because their length varies -- a P1Y series must land on the same
+    calendar date each year, not 365 days later.
+    """
+    months = (duration["years"] * 12 + duration["months"]) * multiplier
+    if months:
+        zero_based = instant.month - 1 + months
+        year = instant.year + zero_based // 12
+        month = zero_based % 12 + 1
+        day = min(instant.day, monthrange(year, month)[1])
+        instant = instant.replace(year=year, month=month, day=day)
+
+    return instant + multiplier * timedelta(
+        days=duration["days"],
+        hours=duration["hours"],
+        minutes=duration["minutes"],
+        seconds=duration["seconds"],
+    )

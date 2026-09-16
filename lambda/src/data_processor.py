@@ -1,114 +1,113 @@
-"""HTTP client for the ENTSO-E Transparency Platform's internal report API.
+"""Turns an ENTSO-E "business report" response into flat, tabular rows.
 
-The platform's UI (https://iop-transparency.entsoe.eu/...) is a single-page
-app: the URLs given in the task are deep links that make the browser POST a
-JSON body to a companion ``/load`` (or ``/loadOverview``) endpoint and render
-the JSON response as a table/chart. There's no documented public REST API
-for this, so each endpoint config carries a ``request_template`` — the exact
-JSON body captured once from the browser's DevTools Network tab (see the
-root README's "Adding a new endpoint" section) — with a few placeholders
-this client fills in at runtime:
+Four jobs, of which flattening is only the most visible one:
 
-  {datetime_from} / {datetime_to}   UTC instants bounding the target day,
-                                     e.g. "2025-12-31T23:00:00Z"
-  {timezone}                        the endpoint's configured timezone code
+1. **Reconstruct the time axis.** The API sends no timestamp per data point
+   -- only a period start, a resolution (``PT60M``) and integer point
+   indices -- so each point's instant is ``from + index * resolution``.
+2. **Name the metrics.** Point values arrive as positional arrays; their
+   names live elsewhere in the document, in ``pointAttributeVariabilityMap``.
+3. **Denormalize the dimensions.** ``AREA``/``PRODUCTION_TYPE``/etc. are
+   stated once per instance; every emitted row carries its own copy.
+4. **Normalize missing data.** ``{"value": 1300.0}`` and ``{"alt": "N/A"}``
+   both collapse to a single cell.
 
-We confirmed (via direct probing) that these endpoints do not require
-authentication: an unauthenticated GET returns a clean
-``uu-app-server/invalidInvocationMethod`` error from the application layer
-rather than a 401/403.
+Every endpoint on the platform that follows the uuApp report convention
+(day-ahead forecast, actual generation per unit, and — per the task — any
+future endpoint of the same family) returns the same envelope shape:
+
+    {
+      "instanceList": [
+        {
+          "businessDimensionMap": {...},        # -> one column per key
+          "instanceAttributeMap": {...},         # -> one column per key (optional)
+          "curveData": {
+            "pointAttributeVariabilityMap": {...},  # ordered list of metric names
+            "periodList": [
+              {"timeInterval": {"from": ...}, "resolution": "PT60M",
+               "pointMap": {"0": [...], "1": [...], ...}}
+            ]
+          }
+        }
+      ]
+    }
+
+Rather than hard-coding column names, this module derives them from whatever
+keys are actually present, so a schema change upstream (a renamed dimension,
+an added metric, an extra period) changes the output columns automatically
+instead of breaking the scrape.
 """
 
 from __future__ import annotations
 
 import json
-import logging
-import time
-import urllib.error
-import urllib.request
-from datetime import date, timedelta
+from datetime import datetime
 from typing import Any
 
-from dates import day_bounds_utc, format_utc_instant
+from dates import format_utc_instant, parse_iso8601_duration, shift_by_duration
 
-logger = logging.getLogger(__name__)
-
-_MAX_ATTEMPTS = 3
-_RETRY_BACKOFF_SECONDS = 2
-_TIMEOUT_SECONDS = 30
-
-
-class DataProcessorError(RuntimeError):
-    """Raised when the API returns a non-2xx status or a populated uuAppErrorMap."""
+# Order in which a point's value is looked for. "value" is the conventional
+# key for a populated data point; "alt" is what the platform sends instead
+# when there's no data yet (e.g. "N/A", "n/e"). Anything else falls back to
+# a raw JSON dump of the point so an unexpected shape never crashes a run.
+_VALUE_KEYS = ("value", "alt")
 
 
-def _fill_template(node: Any, substitutions: dict[str, str]) -> Any:
-    """Recursively substitute ``{placeholder}`` tokens in string leaves of a JSON tree."""
-    if isinstance(node, str):
-        return node.format(**substitutions)
-    if isinstance(node, dict):
-        return {key: _fill_template(value, substitutions) for key, value in node.items()}
-    if isinstance(node, list):
-        return [_fill_template(item, substitutions) for item in node]
-    return node
+def _extract_point_value(point: Any) -> Any:
+    if not isinstance(point, dict):
+        return point
+    for key in _VALUE_KEYS:
+        if key in point and point[key] is not None:
+            return point[key]
+    if not point:
+        return None
+    return json.dumps(point, sort_keys=True)
 
 
-def build_request_body(config: dict[str, Any], run_date: date) -> dict[str, Any]:
-    day = run_date + timedelta(days=config["date_offset_days"])
-    start_utc, end_utc = day_bounds_utc(day, config["timezone"])
-    substitutions = {
-        "datetime_from": format_utc_instant(start_utc),
-        "datetime_to": format_utc_instant(end_utc),
-        "timezone": config["timezone"],
-    }
-    return _fill_template(config["request_template"], substitutions)
+def flatten_response(payload: dict[str, Any], endpoint_name: str) -> list[dict[str, Any]]:
+    """Flatten one API response into a list of flat row dicts.
 
-
-def fetch_endpoint(config: dict[str, Any], run_date: date) -> dict[str, Any]:
-    """POST the templated request body and return the parsed JSON response.
-
-    Retries a small, fixed number of times on network errors and 5xx
-    responses (transient); anything else (4xx, or a 2xx carrying a non-empty
-    ``uuAppErrorMap``, which is how this API reports validation errors even
-    with a 200 status) fails fast since retrying won't help.
+    Each row is one (instance, period, point-index) triple: a timestamp plus
+    the instance's dimension/attribute columns plus one column per metric.
     """
-    body = build_request_body(config, run_date)
-    encoded_body = json.dumps(body).encode("utf-8")
-    endpoint_name = config["endpoint_name"]
+    rows: list[dict[str, Any]] = []
+    data_view_code = payload.get("dataViewCode")
 
-    last_error: Exception | None = None
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        request = urllib.request.Request(
-            config["url"],
-            data=encoded_body,
-            method=config.get("method", "POST"),
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
-                raw_body = response.read()
-                status = response.status
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-            raw_body = exc.read()
-            if status < 500:
-                raise DataProcessorError(
-                    f"[{endpoint_name}] request rejected with HTTP {status}: {raw_body[:2000]!r}"
-                ) from exc
-            last_error = exc
-            logger.warning("[%s] HTTP %s on attempt %d/%d, retrying", endpoint_name, status, attempt, _MAX_ATTEMPTS)
-            time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
-            continue
-        except urllib.error.URLError as exc:
-            last_error = exc
-            logger.warning("[%s] network error on attempt %d/%d: %s", endpoint_name, attempt, _MAX_ATTEMPTS, exc)
-            time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
-            continue
+    for instance in payload.get("instanceList", []) or []:
+        dim_columns = {
+            f"dim_{key}": value
+            for key, value in (instance.get("businessDimensionMap") or {}).items()
+        }
+        attr_columns = {
+            f"attr_{key}": value
+            for key, value in (instance.get("instanceAttributeMap") or {}).items()
+        }
 
-        payload = json.loads(raw_body)
-        error_map = payload.get("uuAppErrorMap") or {}
-        if error_map:
-            raise DataProcessorError(f"[{endpoint_name}] API returned uuAppErrorMap: {json.dumps(error_map)[:2000]}")
-        return payload
+        curve_data = instance.get("curveData") or {}
+        # dict preserves insertion order (Python 3.7+); this order is what
+        # lines up positionally with each point's value array below.
+        metric_names = list((curve_data.get("pointAttributeVariabilityMap") or {}).keys())
 
-    raise DataProcessorError(f"[{endpoint_name}] request failed after {_MAX_ATTEMPTS} attempts: {last_error}")
+        for period in curve_data.get("periodList", []) or []:
+            resolution = parse_iso8601_duration(period["resolution"])
+            # fromisoformat accepts the "...Z", "...+00:00" and fractional-second
+            # spellings the platform might use, so a serializer change upstream
+            # doesn't take the whole scrape down.
+            period_start = datetime.fromisoformat(period["timeInterval"]["from"])
+            point_map: dict[str, list[Any]] = period.get("pointMap") or {}
+
+            for index_str, point_values in point_map.items():
+                timestamp = shift_by_duration(period_start, resolution, int(index_str))
+                row = {
+                    "endpoint_name": endpoint_name,
+                    "data_view_code": data_view_code,
+                    "timestamp_utc": format_utc_instant(timestamp),
+                    **dim_columns,
+                    **attr_columns,
+                }
+                for position, metric_name in enumerate(metric_names):
+                    value = point_values[position] if position < len(point_values) else None
+                    row[metric_name] = _extract_point_value(value)
+                rows.append(row)
+
+    return rows

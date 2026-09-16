@@ -75,6 +75,5 @@ variable "endpoint_schedules" {
   type        = map(string)
   default = {
     generation_forecast_day_ahead = "cron(0 17 * * ? *)" # 17:00 UTC: after day-ahead auctions close
-    generation_actual_per_unit    = "cron(3 0 * * ? *)"  # 00:03 UTC: shortly after the previous day ends
   }
 }

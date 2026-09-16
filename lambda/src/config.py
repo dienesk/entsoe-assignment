@@ -31,6 +31,20 @@ def _required(config: dict[str, Any], key: str) -> Any:
 def validate_endpoint_config(config: dict[str, Any]) -> dict[str, Any]:
     for key in ("endpoint_name", "method", "url", "timezone", "date_offset_days", "request_template", "s3_prefix"):
         _required(config, key)
+
+    # "areas" is optional (not every endpoint takes an area list), but if it's
+    # there it must be usable -- catching a typo here beats a confusing
+    # failure once the request is already in flight.
+    areas = config.get("areas")
+    if areas is not None:
+        if not isinstance(areas, list) or not areas:
+            raise ConfigError(f"{config['endpoint_name']!r}: 'areas' must be a non-empty list, got {areas!r}")
+        for area in areas:
+            if not isinstance(area, str) or "|" not in area:
+                raise ConfigError(
+                    f"{config['endpoint_name']!r}: each area must be an '<AREA_TYPE>|<EIC>' string "
+                    f"(e.g. 'CTA|10YSK-SEPS-----K'), got {area!r}"
+                )
     return config
 
 

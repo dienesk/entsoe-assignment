@@ -16,10 +16,10 @@ from typing import Any
 
 import boto3
 
+from api_client import fetch_endpoint
 from config import list_endpoint_names_from_ssm, load_endpoint_config_from_ssm
 from csv_writer import upload_results
-from data_processor import fetch_endpoint
-from flattener import flatten_response
+from data_processor import flatten_response
 
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))

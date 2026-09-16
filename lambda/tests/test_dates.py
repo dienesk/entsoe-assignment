@@ -1,8 +1,9 @@
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from dates import day_bounds_utc, format_utc_instant, parse_iso8601_duration_minutes
+from dates import day_bounds_utc, format_utc_instant, parse_iso8601_duration, shift_by_duration
 
 
 def test_day_bounds_utc_matches_observed_api_response():
@@ -22,15 +23,39 @@ def test_day_bounds_utc_handles_dst_transition():
     assert format_utc_instant(end) == "2026-07-01T22:00:00Z"
 
 
-def test_parse_iso8601_duration_minutes():
-    assert parse_iso8601_duration_minutes("PT60M") == 60
-    assert parse_iso8601_duration_minutes("PT30M") == 30
-    assert parse_iso8601_duration_minutes("PT15M") == 15
+@pytest.mark.parametrize(
+    "duration,steps,expected",
+    [
+        # Resolutions actually observed across the platform's endpoints.
+        ("PT15M", 4, "2026-01-01T01:00:00Z"),  # intraday
+        ("PT60M", 3, "2026-01-01T03:00:00Z"),  # day-ahead
+        ("P1D", 2, "2026-01-03T00:00:00Z"),
+        ("P1M", 2, "2026-03-01T00:00:00Z"),  # calendar months, not 30 days
+        ("P1Y", 2, "2028-01-01T00:00:00Z"),  # installed capacity
+    ],
+)
+def test_shift_by_duration_across_the_platforms_resolutions(duration, steps, expected):
+    start = datetime(2026, 1, 1, tzinfo=ZoneInfo("UTC"))
+
+    result = shift_by_duration(start, parse_iso8601_duration(duration), steps)
+
+    assert format_utc_instant(result) == expected
 
 
-def test_parse_iso8601_duration_minutes_rejects_unsupported_format():
-    with pytest.raises(ValueError):
-        parse_iso8601_duration_minutes("P1D")
+def test_shift_by_month_clamps_to_end_of_shorter_month():
+    # 31 Jan + 1 month has no 31st to land on; clamp rather than overflow.
+    start = datetime(2026, 1, 31, tzinfo=ZoneInfo("UTC"))
+
+    result = shift_by_duration(start, parse_iso8601_duration("P1M"), 1)
+
+    assert format_utc_instant(result) == "2026-02-28T00:00:00Z"
+
+
+def test_parse_iso8601_duration_rejects_unrecognized_format():
+    # Better to fail loudly than silently emit wrong timestamps for every row.
+    for bad in ["", "P", "PT", "1H", "P1X", "banana"]:
+        with pytest.raises(ValueError):
+            parse_iso8601_duration(bad)
 
 
 @pytest.mark.parametrize(

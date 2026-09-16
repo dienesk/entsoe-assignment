@@ -16,5 +16,4 @@ fck_nat_ha_mode = false
 # lambda/config/endpoints/ (without the .json extension).
 endpoint_schedules = {
   generation_forecast_day_ahead = "cron(0 17 * * ? *)"
-  generation_actual_per_unit    = "cron(3 0 * * ? *)"
 }
