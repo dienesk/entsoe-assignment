@@ -11,15 +11,14 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import boto3
 
 from config import list_endpoint_names_from_ssm, load_endpoint_config_from_ssm
 from csv_writer import upload_results
-from dates import target_date as compute_target_date
-from entsoe_client import fetch_endpoint
+from data_processor import fetch_endpoint
 from flattener import flatten_response
 
 logger = logging.getLogger()
@@ -42,7 +41,7 @@ def _run_one_endpoint(endpoint_name: str, run_date: date, bucket: str) -> dict[s
         bucket=bucket,
         s3_prefix=config["s3_prefix"],
         endpoint_name=endpoint_name,
-        target_date=compute_target_date(run_date, config["date_offset_days"]),
+        target_date=run_date + timedelta(days=config["date_offset_days"]),
         raw_payload=payload,
         rows=rows,
     )

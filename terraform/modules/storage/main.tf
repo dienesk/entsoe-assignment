@@ -42,24 +42,42 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "output" {
 resource "aws_s3_bucket_lifecycle_configuration" "output" {
   bucket = aws_s3_bucket.output.id
 
-  # Raw JSON responses (kept only for reprocessing) live at varying prefixes
-  # per endpoint, so a fixed key prefix can't select them -- the Lambda tags
-  # each raw upload with data-class=raw (see lambda/src/csv_writer.py) and
-  # this rule matches on that tag instead. Flattened CSVs are never tagged
-  # this way and so are kept indefinitely.
+  # Raw JSON responses are kept only so a changed flattener can reprocess
+  # them, so they age out; the flattened CSVs are kept indefinitely. The
+  # Lambda writes raw payloads under a single top-level "raw/" prefix
+  # (lambda/src/csv_writer.py::build_s3_key) precisely so this rule can
+  # select them by prefix.
   rule {
     id     = "expire-raw-json"
     status = "Enabled"
 
     filter {
-      tag {
-        key   = "data-class"
-        value = "raw"
-      }
+      prefix = "raw/"
     }
 
     expiration {
       days = var.raw_json_expiration_days
+    }
+
+    # Versioning is enabled on this bucket, so the expiration above only
+    # writes a delete marker and leaves the actual payload behind as a
+    # noncurrent version. Without this block the raw data is never really
+    # deleted and storage grows without bound.
+    noncurrent_version_expiration {
+      noncurrent_days = 1
+    }
+  }
+
+  # Clean up the delete markers the rule above leaves behind once their last
+  # noncurrent version is gone, so listings don't fill up with tombstones.
+  rule {
+    id     = "clean-expired-delete-markers"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      expired_object_delete_marker = true
     }
   }
 }

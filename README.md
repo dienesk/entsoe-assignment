@@ -98,7 +98,7 @@ deploy**:
 
 If the template is wrong, the Lambda's CloudWatch Logs will show either an
 HTTP error or the API's `uuAppErrorMap` verbatim (see
-[`entsoe_client.py`](lambda/src/entsoe_client.py)) — it's designed to fail
+[`data_processor.py`](lambda/src/data_processor.py)) — it's designed to fail
 loudly and specifically rather than silently write an empty CSV.
 
 ## Repository layout

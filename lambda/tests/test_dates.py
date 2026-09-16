@@ -1,12 +1,8 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
-from dates import day_bounds_utc, format_utc_instant, parse_iso8601_duration_minutes, target_date
+import pytest
 
-
-def test_target_date_applies_offset():
-    assert target_date(date(2026, 1, 1), offset_days=1) == date(2026, 1, 2)
-    assert target_date(date(2026, 1, 1), offset_days=-1) == date(2025, 12, 31)
-    assert target_date(date(2026, 1, 1), offset_days=0) == date(2026, 1, 1)
+from dates import day_bounds_utc, format_utc_instant, parse_iso8601_duration_minutes
 
 
 def test_day_bounds_utc_matches_observed_api_response():
@@ -33,7 +29,19 @@ def test_parse_iso8601_duration_minutes():
 
 
 def test_parse_iso8601_duration_minutes_rejects_unsupported_format():
-    import pytest
-
     with pytest.raises(ValueError):
         parse_iso8601_duration_minutes("P1D")
+
+
+@pytest.mark.parametrize(
+    "instant",
+    [
+        datetime(2026, 1, 1, 12, 0),  # naive
+        datetime(2026, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=2))),  # CEST, not UTC
+    ],
+)
+def test_format_utc_instant_rejects_non_utc(instant):
+    # Appending a literal "Z" to these would silently mislabel every
+    # timestamp written to the CSV.
+    with pytest.raises(ValueError):
+        format_utc_instant(instant)

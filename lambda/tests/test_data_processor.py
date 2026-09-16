@@ -1,7 +1,7 @@
 from datetime import date
 
 from config import load_local_endpoint_config
-from entsoe_client import build_request_body
+from data_processor import build_request_body
 
 
 def test_build_request_body_substitutes_date_placeholders():

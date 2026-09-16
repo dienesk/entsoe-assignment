@@ -80,6 +80,22 @@ def test_missing_instance_list_yields_no_rows():
     assert flatten_response({}, "whatever") == []
 
 
+@pytest.mark.parametrize(
+    "from_instant",
+    ["2025-12-31T23:00:00Z", "2025-12-31T23:00:00.000Z", "2025-12-31T23:00:00+00:00"],
+)
+def test_period_start_accepts_iso8601_spelling_variants(from_instant):
+    # The platform is an undocumented internal API; a serializer change that
+    # starts emitting fractional seconds or a numeric offset must not take
+    # the whole scrape down.
+    payload = load_fixture("day_ahead_response.json")
+    payload["instanceList"][0]["curveData"]["periodList"][0]["timeInterval"]["from"] = from_instant
+
+    rows = flatten_response(payload, "generation_forecast_day_ahead")
+
+    assert rows[0]["timestamp_utc"] == "2025-12-31T23:00:00Z"
+
+
 @pytest.mark.parametrize("fixture_name", ["day_ahead_response.json", "per_unit_response.json"])
 def test_unknown_extra_keys_do_not_break_flattening(fixture_name):
     payload = load_fixture(fixture_name)

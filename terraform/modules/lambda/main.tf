@@ -79,9 +79,16 @@ data "aws_iam_policy_document" "lambda_inline" {
   }
 
   statement {
-    sid       = "ReadEndpointConfig"
-    actions   = ["ssm:GetParameter", "ssm:GetParametersByPath"]
-    resources = ["arn:aws:ssm:*:*:parameter${var.ssm_config_prefix}*"]
+    sid     = "ReadEndpointConfig"
+    actions = ["ssm:GetParameter", "ssm:GetParametersByPath"]
+    # Strictly the config path and its children. A bare "<prefix>*" wildcard
+    # would also match unrelated siblings such as "<prefix>-secret"; the path
+    # itself is included because GetParametersByPath is authorized against
+    # the path being queried, not only the parameters it returns.
+    resources = [
+      "arn:aws:ssm:*:*:parameter${var.ssm_config_prefix}",
+      "arn:aws:ssm:*:*:parameter${var.ssm_config_prefix}/*",
+    ]
   }
 }
 

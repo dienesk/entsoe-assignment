@@ -28,10 +28,11 @@ instead of breaking the scrape.
 
 from __future__ import annotations
 
-from datetime import timedelta
+import json
+from datetime import datetime, timedelta
 from typing import Any
 
-from dates import format_utc_instant, parse_iso8601_duration_minutes, parse_utc_instant
+from dates import format_utc_instant, parse_iso8601_duration_minutes
 
 # Order in which a point's value is looked for. "value" is the conventional
 # key for a populated data point; "alt" is what the platform sends instead
@@ -48,8 +49,6 @@ def _extract_point_value(point: Any) -> Any:
             return point[key]
     if not point:
         return None
-    import json
-
     return json.dumps(point, sort_keys=True)
 
 
@@ -79,7 +78,10 @@ def flatten_response(payload: dict[str, Any], endpoint_name: str) -> list[dict[s
 
         for period in curve_data.get("periodList", []) or []:
             resolution_minutes = parse_iso8601_duration_minutes(period["resolution"])
-            period_start = parse_utc_instant(period["timeInterval"]["from"])
+            # fromisoformat accepts the "...Z", "...+00:00" and fractional-second
+            # spellings the platform might use, so a serializer change upstream
+            # doesn't take the whole scrape down.
+            period_start = datetime.fromisoformat(period["timeInterval"]["from"])
             point_map: dict[str, list[Any]] = period.get("pointMap") or {}
 
             for index_str, point_values in point_map.items():

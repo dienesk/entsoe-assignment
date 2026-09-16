@@ -26,10 +26,10 @@ import logging
 import time
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
-from dates import day_bounds_utc, format_utc_instant, target_date
+from dates import day_bounds_utc, format_utc_instant
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ _RETRY_BACKOFF_SECONDS = 2
 _TIMEOUT_SECONDS = 30
 
 
-class EntsoeApiError(RuntimeError):
+class DataProcessorError(RuntimeError):
     """Raised when the API returns a non-2xx status or a populated uuAppErrorMap."""
 
 
@@ -54,7 +54,7 @@ def _fill_template(node: Any, substitutions: dict[str, str]) -> Any:
 
 
 def build_request_body(config: dict[str, Any], run_date: date) -> dict[str, Any]:
-    day = target_date(run_date, config["date_offset_days"])
+    day = run_date + timedelta(days=config["date_offset_days"])
     start_utc, end_utc = day_bounds_utc(day, config["timezone"])
     substitutions = {
         "datetime_from": format_utc_instant(start_utc),
@@ -92,7 +92,7 @@ def fetch_endpoint(config: dict[str, Any], run_date: date) -> dict[str, Any]:
             status = exc.code
             raw_body = exc.read()
             if status < 500:
-                raise EntsoeApiError(
+                raise DataProcessorError(
                     f"[{endpoint_name}] request rejected with HTTP {status}: {raw_body[:2000]!r}"
                 ) from exc
             last_error = exc
@@ -108,7 +108,7 @@ def fetch_endpoint(config: dict[str, Any], run_date: date) -> dict[str, Any]:
         payload = json.loads(raw_body)
         error_map = payload.get("uuAppErrorMap") or {}
         if error_map:
-            raise EntsoeApiError(f"[{endpoint_name}] API returned uuAppErrorMap: {json.dumps(error_map)[:2000]}")
+            raise DataProcessorError(f"[{endpoint_name}] API returned uuAppErrorMap: {json.dumps(error_map)[:2000]}")
         return payload
 
-    raise EntsoeApiError(f"[{endpoint_name}] request failed after {_MAX_ATTEMPTS} attempts: {last_error}")
+    raise DataProcessorError(f"[{endpoint_name}] request failed after {_MAX_ATTEMPTS} attempts: {last_error}")

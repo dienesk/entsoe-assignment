@@ -28,10 +28,20 @@ def rows_to_csv(rows: list[dict[str, Any]]) -> bytes:
     return buffer.getvalue().encode("utf-8")
 
 
+RAW_PREFIX = "raw/"
+
+
 def build_s3_key(s3_prefix: str, endpoint_name: str, target_date: date, run_timestamp: datetime, extension: str) -> str:
+    """Build the S3 key for one output file.
+
+    Raw JSON goes under a single top-level ``raw/`` prefix rather than a
+    ``raw/`` segment nested inside each endpoint's prefix, because S3
+    lifecycle rules can only filter on a fixed key prefix (or tag) -- see
+    the expire-raw-json rule in terraform/modules/storage.
+    """
     ts = run_timestamp.strftime("%Y%m%dT%H%M%SZ")
-    suffix = "raw/" if extension == "json" else ""
-    return f"{s3_prefix.strip('/')}/date={target_date.isoformat()}/{suffix}{endpoint_name}_{ts}.{extension}"
+    root = RAW_PREFIX if extension == "json" else ""
+    return f"{root}{s3_prefix.strip('/')}/date={target_date.isoformat()}/{endpoint_name}_{ts}.{extension}"
 
 
 def upload_results(
