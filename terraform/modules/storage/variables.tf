@@ -2,7 +2,7 @@ variable "name_prefix" {
   type = string
 }
 
-variable "raw_json_expiration_days" {
+variable "raw_response_expiration_days" {
   type = number
 }
 

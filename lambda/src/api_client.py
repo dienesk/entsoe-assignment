@@ -1,131 +1,165 @@
-"""HTTP client for the ENTSO-E Transparency Platform's internal report API.
+"""HTTP client for the ENTSO-E Transparency Platform's RESTful API.
 
-The platform's UI (https://iop-transparency.entsoe.eu/...) is a single-page
-app: the URLs given in the task are deep links that make the browser POST a
-JSON body to a companion ``/load`` (or ``/loadOverview``) endpoint and render
-the JSON response as a table/chart. There's no documented public REST API
-for this, so each endpoint config carries a ``request_template`` — the exact
-JSON body captured once from the browser's DevTools Network tab (see the
-root README's "Adding a new endpoint" section) — with a few placeholders
-this client fills in at runtime:
+The API is a single GET endpoint (``https://web-api.tp.entsoe.eu/api``)
+whose query string selects the report: a ``documentType``/``processType``
+pair, an area, and a UTC period. Each endpoint config supplies the selecting
+parameters as a ``query_template``; this client adds the period bounds and
+the security token at request time.
 
-  {datetime_from} / {datetime_to}   UTC instants bounding the target day,
-                                     e.g. "2025-12-31T23:00:00Z"
-  {timezone}                        the endpoint's configured timezone code
+Two things worth knowing before changing anything here:
 
-We confirmed (via direct probing) that these endpoints do not require
-authentication: an unauthenticated GET returns a clean
-``uu-app-server/invalidInvocationMethod`` error from the application layer
-rather than a 401/403.
+* **One area per request.** Unlike the platform's web UI, the API takes a
+  single domain EIC per call, so an endpoint config listing three areas
+  produces three requests and three documents. They are flattened into one
+  CSV, distinguished by the ``request_area`` column.
+* **HTTP 200 does not mean data.** When a report exists but has nothing for
+  the requested period, the API answers ``200`` with an
+  ``Acknowledgement_MarketDocument`` instead of the expected
+  ``*_MarketDocument``. Rejected requests use the same acknowledgement body
+  but a ``4xx`` status. That status is the only reliable discriminator --
+  both carry ``Reason/code`` 999 -- so it, not the reason text, is what
+  this module branches on.
+
+The security token is a credential: it is passed as a query parameter, which
+means it would otherwise end up in log lines and exception messages. Every
+URL that leaves this module via a log or an exception goes through
+``_redact`` first.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
-from dates import day_bounds_utc, format_utc_instant
+from dates import day_bounds_utc, format_api_period_bound
 
 logger = logging.getLogger(__name__)
-
-_WHOLE_PLACEHOLDER_PATTERN = re.compile(r"\{(\w+)\}")
 
 _MAX_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = 2
 _TIMEOUT_SECONDS = 30
 
+_TOKEN_PARAM_PATTERN = re.compile(r"(securityToken=)[^&\s]*")
+_ACKNOWLEDGEMENT_ROOT = b"Acknowledgement_MarketDocument"
+_REASON_PATTERN = re.compile(rb"<Reason>.*?<code>(.*?)</code>.*?<text>(.*?)</text>.*?</Reason>", re.DOTALL)
+
 
 class ApiClientError(RuntimeError):
-    """Raised when the API returns a non-2xx status or a populated uuAppErrorMap."""
+    """Raised when the API rejects a request or answers with an unusable body."""
 
 
-def _fill_template(node: Any, substitutions: dict[str, Any]) -> Any:
-    """Recursively resolve ``{placeholder}`` tokens in a JSON tree.
+class NoDataError(ApiClientError):
+    """Raised when the API answers 200 with an acknowledgement instead of a report.
 
-    A string that is *exactly* one placeholder resolves to the substitution's
-    real value, preserving its type -- so ``"areaList": "{areas}"`` yields a
-    JSON list, not a stringified one. Placeholders embedded in a longer
-    string are interpolated textually as usual.
+    Its own class because it means something operationally different from a
+    rejected request: the request was well-formed but the data isn't
+    published (yet). Day-ahead figures appear only once the auction closes,
+    so a run scheduled too early lands here.
     """
-    if isinstance(node, str):
-        whole_value = _WHOLE_PLACEHOLDER_PATTERN.fullmatch(node)
-        if whole_value and whole_value.group(1) in substitutions:
-            return substitutions[whole_value.group(1)]
-        return node.format(**substitutions)
-    if isinstance(node, dict):
-        return {key: _fill_template(value, substitutions) for key, value in node.items()}
-    if isinstance(node, list):
-        return [_fill_template(item, substitutions) for item in node]
-    return node
 
 
-def build_request_body(config: dict[str, Any], run_date: date) -> dict[str, Any]:
+@dataclass(frozen=True)
+class FetchedDocument:
+    """One area's raw XML response, kept as bytes so it is stored byte-for-byte."""
+
+    area: str | None
+    body: bytes
+
+
+def _redact(text: str) -> str:
+    return _TOKEN_PARAM_PATTERN.sub(r"\1***", text)
+
+
+def build_query_params(config: dict[str, Any], run_date: date, area: str | None = None) -> dict[str, str]:
+    """Build the query parameters for one request, minus the security token.
+
+    ``query_template`` holds the report selectors verbatim (``documentType``,
+    ``processType``, and whichever parameter carries the area for this report
+    -- ``in_Domain``, ``outBiddingZone_Domain``, ...). ``{area}`` in any
+    value is replaced with the area being fetched, which is why adding a
+    report that keys its area differently needs no code change.
+
+    ``periodStart``/``periodEnd`` are computed from the config's timezone and
+    ``date_offset_days`` and injected unless the template set them itself.
+    """
     day = run_date + timedelta(days=config["date_offset_days"])
     start_utc, end_utc = day_bounds_utc(day, config["timezone"])
-    substitutions: dict[str, Any] = {
-        "datetime_from": format_utc_instant(start_utc),
-        "datetime_to": format_utc_instant(end_utc),
-        "timezone": config["timezone"],
+    substitutions = {
+        "area": area or "",
+        "period_start": format_api_period_bound(start_utc),
+        "period_end": format_api_period_bound(end_utc),
     }
-    # Countries/control areas are the field operators change most often, so
-    # they live at the top level of the config rather than buried in the
-    # template. Endpoints whose payload has no area list simply omit both.
-    if "areas" in config:
-        substitutions["areas"] = config["areas"]
-    return _fill_template(config["request_template"], substitutions)
+
+    params = {key: str(value).format(**substitutions) for key, value in config["query_template"].items()}
+    params.setdefault("periodStart", substitutions["period_start"])
+    params.setdefault("periodEnd", substitutions["period_end"])
+    return params
 
 
-def fetch_endpoint(config: dict[str, Any], run_date: date) -> dict[str, Any]:
-    """POST the templated request body and return the parsed JSON response.
+def _reason(body: bytes) -> str:
+    match = _REASON_PATTERN.search(body)
+    if not match:
+        return body[:2000].decode("utf-8", errors="replace")
+    code, text = (part.decode("utf-8", errors="replace").strip() for part in match.groups())
+    return f"{code}: {text}"
 
-    Retries a small, fixed number of times on network errors and 5xx
-    responses (transient); anything else (4xx, or a 2xx carrying a non-empty
-    ``uuAppErrorMap``, which is how this API reports validation errors even
-    with a 200 status) fails fast since retrying won't help.
+
+def _fetch_one(url: str, endpoint_name: str, area: str | None) -> bytes:
+    """GET one document, retrying transient failures.
+
+    Network errors and 5xx are retried; 4xx is not, because a rejected
+    request (bad document type, period too long, expired token) fails
+    identically every time and the reason text is more useful now than three
+    attempts later.
     """
-    body = build_request_body(config, run_date)
-    encoded_body = json.dumps(body).encode("utf-8")
-    endpoint_name = config["endpoint_name"]
-
     last_error: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
-        request = urllib.request.Request(
-            config["url"],
-            data=encoded_body,
-            method=config.get("method", "POST"),
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-        )
+        request = urllib.request.Request(url, method="GET", headers={"Accept": "application/xml"})
         try:
             with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
-                raw_body = response.read()
+                body = response.read()
                 status = response.status
         except urllib.error.HTTPError as exc:
-            status = exc.code
-            raw_body = exc.read()
+            status, body = exc.code, exc.read()
             if status < 500:
                 raise ApiClientError(
-                    f"[{endpoint_name}] request rejected with HTTP {status}: {raw_body[:2000]!r}"
+                    f"[{endpoint_name}] area={area}: request rejected with HTTP {status} -- {_reason(body)}"
                 ) from exc
             last_error = exc
             logger.warning("[%s] HTTP %s on attempt %d/%d, retrying", endpoint_name, status, attempt, _MAX_ATTEMPTS)
-            time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
-            continue
         except urllib.error.URLError as exc:
             last_error = exc
-            logger.warning("[%s] network error on attempt %d/%d: %s", endpoint_name, attempt, _MAX_ATTEMPTS, exc)
-            time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
-            continue
+            logger.warning(
+                "[%s] network error on attempt %d/%d: %s", endpoint_name, attempt, _MAX_ATTEMPTS, _redact(str(exc))
+            )
+        else:
+            if _ACKNOWLEDGEMENT_ROOT in body[:500]:
+                raise NoDataError(f"[{endpoint_name}] area={area}: no data published -- {_reason(body)}")
+            return body
 
-        payload = json.loads(raw_body)
-        error_map = payload.get("uuAppErrorMap") or {}
-        if error_map:
-            raise ApiClientError(f"[{endpoint_name}] API returned uuAppErrorMap: {json.dumps(error_map)[:2000]}")
-        return payload
+        time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
 
-    raise ApiClientError(f"[{endpoint_name}] request failed after {_MAX_ATTEMPTS} attempts: {last_error}")
+    raise ApiClientError(
+        f"[{endpoint_name}] area={area}: request failed after {_MAX_ATTEMPTS} attempts: {_redact(str(last_error))}"
+    )
+
+
+def fetch_endpoint(config: dict[str, Any], run_date: date, security_token: str) -> list[FetchedDocument]:
+    """Fetch one document per configured area (or a single one if the report takes no area)."""
+    endpoint_name = config["endpoint_name"]
+    areas: list[str | None] = list(config.get("areas") or [None])
+
+    documents: list[FetchedDocument] = []
+    for area in areas:
+        params = build_query_params(config, run_date, area)
+        url = f"{config['url']}?{urllib.parse.urlencode({**params, 'securityToken': security_token})}"
+        logger.info("[%s] GET %s", endpoint_name, _redact(url))
+        documents.append(FetchedDocument(area=area, body=_fetch_one(url, endpoint_name, area)))
+    return documents

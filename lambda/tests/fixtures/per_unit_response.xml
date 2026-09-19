@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<GL_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-6:generationloaddocument:3:0">
+  <mRID>d10e9943a03f4a99a6de6e1031e9bcc1</mRID>
+  <revisionNumber>1</revisionNumber>
+  <type>A73</type>
+  <process.processType>A16</process.processType>
+  <sender_MarketParticipant.mRID codingScheme="A01">10X1001A1001A450</sender_MarketParticipant.mRID>
+  <sender_MarketParticipant.marketRole.type>A32</sender_MarketParticipant.marketRole.type>
+  <receiver_MarketParticipant.mRID codingScheme="A01">10X1001A1001A450</receiver_MarketParticipant.mRID>
+  <receiver_MarketParticipant.marketRole.type>A33</receiver_MarketParticipant.marketRole.type>
+  <createdDateTime>2026-09-17T11:16:34Z</createdDateTime>
+  <time_Period.timeInterval>
+    <start>2026-09-15T00:00Z</start>
+    <end>2026-09-15T02:00Z</end>
+  </time_Period.timeInterval>
+              <TimeSeries>
+                <mRID>1</mRID>
+                <businessType>A01</businessType>
+                <objectAggregation>A06</objectAggregation>
+                    <inBiddingZone_Domain.mRID codingScheme="A01">10YSK-SEPS-----K</inBiddingZone_Domain.mRID>
+                <registeredResource.mRID codingScheme="A01">24WV--EBO------8</registeredResource.mRID>
+                <quantity_Measure_Unit.name>MAW</quantity_Measure_Unit.name>
+                <curveType>A03</curveType>
+                <MktPSRType>
+                  <psrType>B14</psrType>
+                  <PowerSystemResources>
+                    <mRID codingScheme="A01">24WG--EBOG31---D</mRID>
+                    <name>Bohunice TG31</name>
+                  </PowerSystemResources>
+                </MktPSRType>
+                    <Period>
+                      <timeInterval>
+                        <start>2026-09-15T00:00Z</start>
+                        <end>2026-09-15T02:00Z</end>
+                      </timeInterval>
+                      <resolution>PT60M</resolution>
+                          <Point>
+                            <position>1</position>
+                            <quantity>246.603</quantity>
+                          </Point>
+                          <Point>
+                            <position>2</position>
+                            <quantity>247.009</quantity>
+                          </Point>
+                    </Period>
+              </TimeSeries>
+              <TimeSeries>
+                <mRID>2</mRID>
+                <businessType>A01</businessType>
+                <objectAggregation>A06</objectAggregation>
+                    <inBiddingZone_Domain.mRID codingScheme="A01">10YSK-SEPS-----K</inBiddingZone_Domain.mRID>
+                <registeredResource.mRID codingScheme="A01">24WV--EBO------8</registeredResource.mRID>
+                <quantity_Measure_Unit.name>MAW</quantity_Measure_Unit.name>
+                <curveType>A03</curveType>
+                <MktPSRType>
+                  <psrType>B14</psrType>
+                  <PowerSystemResources>
+                    <mRID codingScheme="A01">24WG--EBOG32---8</mRID>
+                    <name>Bohunice TG32</name>
+                  </PowerSystemResources>
+                </MktPSRType>
+                    <Period>
+                      <timeInterval>
+                        <start>2026-09-15T00:00Z</start>
+                        <end>2026-09-15T02:00Z</end>
+                      </timeInterval>
+                      <resolution>PT60M</resolution>
+                          <Point>
+                            <position>1</position>
+                            <quantity>233.604</quantity>
+                          </Point>
+                          <Point>
+                            <position>2</position>
+                            <quantity>233.687</quantity>
+                          </Point>
+                    </Period>
+              </TimeSeries>
+</GL_MarketDocument>

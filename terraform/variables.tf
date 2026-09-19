@@ -58,10 +58,16 @@ variable "lambda_log_retention_days" {
   default     = 30
 }
 
-variable "s3_raw_json_expiration_days" {
-  description = "Days after which raw JSON responses (kept for reprocessing) are expired from S3. The flattened CSVs are kept indefinitely."
+variable "s3_raw_response_expiration_days" {
+  description = "Days after which raw XML responses (kept for reprocessing) are expired from S3. The flattened CSVs are kept indefinitely."
   type        = number
   default     = 90
+}
+
+variable "security_token_parameter_name" {
+  description = "Name of the SecureString SSM parameter holding the ENTSO-E API security token. Defaults to /<project>/<environment>/entsoe/security-token. Terraform never reads or writes its value -- create it once out of band (see the root README) so the credential stays out of terraform.tfstate."
+  type        = string
+  default     = null
 }
 
 variable "default_schedule_expression" {

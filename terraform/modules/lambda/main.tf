@@ -18,7 +18,7 @@ resource "aws_cloudwatch_log_group" "lambda" {
 
 resource "aws_security_group" "lambda" {
   name        = "${var.name_prefix}-lambda"
-  description = "Scraper Lambda: outbound HTTPS only (egress to ENTSO-E goes via fck-nat)."
+  description = "Scraper Lambda: outbound HTTPS only (egress to web-api.tp.entsoe.eu goes via fck-nat)."
   vpc_id      = var.vpc_id
 
   egress {
@@ -33,6 +33,17 @@ resource "aws_security_group" "lambda" {
 }
 
 # --- IAM: least-privilege execution role ------------------------------------
+
+# The security token is a SecureString encrypted under the AWS-managed
+# aws/ssm key, so reading it needs kms:Decrypt on that key in addition to
+# ssm:GetParameter. The parameter itself is created outside Terraform (see
+# the root README) so its value never lands in a state file -- which is also
+# why it is referenced by name here rather than read through a data source.
+data "aws_kms_alias" "ssm" {
+  name = "alias/aws/ssm"
+}
+
+data "aws_region" "current" {}
 
 data "aws_iam_policy_document" "assume_role" {
   statement {
@@ -90,6 +101,26 @@ data "aws_iam_policy_document" "lambda_inline" {
       "arn:aws:ssm:*:*:parameter${var.ssm_config_prefix}/*",
     ]
   }
+
+  statement {
+    sid       = "ReadSecurityToken"
+    actions   = ["ssm:GetParameter"]
+    resources = ["arn:aws:ssm:*:*:parameter${var.security_token_parameter_name}"]
+  }
+
+  statement {
+    sid       = "DecryptSecurityToken"
+    actions   = ["kms:Decrypt"]
+    resources = [data.aws_kms_alias.ssm.target_key_arn]
+
+    # The aws/ssm key is usable by anything in the account that SSM fronts,
+    # so pin this grant to decrypts that actually go through SSM.
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${data.aws_region.current.region}.amazonaws.com"]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "lambda_inline" {
@@ -118,9 +149,10 @@ resource "aws_lambda_function" "scraper" {
 
   environment {
     variables = {
-      OUTPUT_BUCKET     = var.output_bucket_name
-      SSM_CONFIG_PREFIX = var.ssm_config_prefix
-      LOG_LEVEL         = "INFO"
+      OUTPUT_BUCKET            = var.output_bucket_name
+      SSM_CONFIG_PREFIX        = var.ssm_config_prefix
+      SECURITY_TOKEN_PARAMETER = var.security_token_parameter_name
+      LOG_LEVEL                = "INFO"
     }
   }
 

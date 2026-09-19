@@ -27,6 +27,11 @@ variable "ssm_config_prefix" {
   type = string
 }
 
+variable "security_token_parameter_name" {
+  description = "Name of the SecureString SSM parameter holding the ENTSO-E API security token. Created outside Terraform, so only the name is referenced here -- the value never enters state."
+  type        = string
+}
+
 variable "timeout_seconds" {
   type = number
 }

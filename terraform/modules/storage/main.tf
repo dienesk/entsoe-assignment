@@ -1,5 +1,5 @@
 # Private, encrypted, versioned bucket holding the scraped CSVs (kept
-# indefinitely) and the raw JSON responses (expired after N days -- they
+# indefinitely) and the raw XML responses (expired after N days -- they
 # exist to allow reprocessing if the processing logic changes, not as a
 # permanent archive).
 
@@ -42,13 +42,13 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "output" {
 resource "aws_s3_bucket_lifecycle_configuration" "output" {
   bucket = aws_s3_bucket.output.id
 
-  # Raw JSON responses are kept only so changed processing logic can reprocess
+  # Raw XML responses are kept only so changed processing logic can reprocess
   # them, so they age out; the flattened CSVs are kept indefinitely. The
   # Lambda writes raw payloads under a single top-level "raw/" prefix
   # (lambda/src/csv_writer.py::build_s3_key) precisely so this rule can
   # select them by prefix.
   rule {
-    id     = "expire-raw-json"
+    id     = "expire-raw-responses"
     status = "Enabled"
 
     filter {
@@ -56,7 +56,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "output" {
     }
 
     expiration {
-      days = var.raw_json_expiration_days
+      days = var.raw_response_expiration_days
     }
 
     # Versioning is enabled on this bucket, so the expiration above only

@@ -3,10 +3,12 @@
 Everything else the app needs (parsing an instant, adding a day offset) is a
 one-liner on top of the standard library and lives at its call site.
 
-The ENTSO-E Transparency Platform expresses each report's time window as a
-UTC instant pair (e.g. ``2025-12-31T23:00:00Z`` .. ``2026-01-01T23:00:00Z``
-for the CET calendar day 2026-01-01), so converting a local calendar day to
-those bounds — correctly across DST — is the interesting part.
+The ENTSO-E API expresses each report's time window as a pair of UTC
+instants in ``yyyyMMddHHmm`` form (e.g. ``202512312300`` ..
+``202601012300`` for the CET calendar day 2026-01-01), so converting a local
+calendar day to those bounds — correctly across DST — is the interesting
+part. Timestamps *inside* a response are ISO-8601 instead, hence the two
+formatters below.
 """
 
 from __future__ import annotations
@@ -31,15 +33,31 @@ def day_bounds_utc(local_day: date, tz_name: str) -> tuple[datetime, datetime]:
     return start_local.astimezone(_UTC), end_local.astimezone(_UTC)
 
 
-def format_utc_instant(instant: datetime) -> str:
-    """Format an aware UTC datetime the way the platform's API expresses instants.
+def _require_utc(instant: datetime) -> datetime:
+    """Reject naive or non-UTC input.
 
-    Rejects naive or non-UTC input rather than appending a ``Z`` to something
-    that isn't UTC, which would silently mislabel every timestamp downstream.
+    Both formatters below state UTC implicitly -- one with a literal ``Z``,
+    the other by omitting the zone entirely -- so formatting a CET instant
+    would silently mislabel it by an hour or two, in the output CSV or in the
+    requested period.
     """
     if instant.utcoffset() != timedelta(0):
         raise ValueError(f"Expected an aware UTC datetime, got {instant!r}")
-    return instant.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return instant
+
+
+def format_utc_instant(instant: datetime) -> str:
+    """Format an aware UTC datetime as an ISO-8601 instant, for the output CSV."""
+    return _require_utc(instant).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def format_api_period_bound(instant: datetime) -> str:
+    """Format an aware UTC datetime as the API's ``periodStart``/``periodEnd`` value.
+
+    The API's own spelling: ``yyyyMMddHHmm``, always UTC, no separators and
+    no zone marker.
+    """
+    return _require_utc(instant).strftime("%Y%m%d%H%M")
 
 
 # Note the two different meanings of "M": months before the T separator,

@@ -17,9 +17,9 @@ from typing import Any
 import boto3
 
 from api_client import fetch_endpoint
-from config import list_endpoint_names_from_ssm, load_endpoint_config_from_ssm
+from config import list_endpoint_names_from_ssm, load_endpoint_config_from_ssm, load_security_token
 from csv_writer import upload_results
-from data_processor import flatten_response
+from data_processor import flatten_document
 
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
@@ -27,14 +27,28 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 _ssm_client = boto3.client("ssm")
 _s3_client = boto3.client("s3")
 
+# Read once per container rather than per endpoint: the token is static, and
+# a SecureString read costs a KMS decrypt each time.
+_security_token: str | None = None
+
+
+def _get_security_token() -> str:
+    global _security_token
+    if _security_token is None:
+        _security_token = load_security_token(_ssm_client)
+    return _security_token
+
 
 def _run_one_endpoint(endpoint_name: str, run_date: date, bucket: str) -> dict[str, Any]:
     config = load_endpoint_config_from_ssm(endpoint_name, _ssm_client)
     logger.info("Fetching endpoint %s for run_date=%s", endpoint_name, run_date)
 
-    payload = fetch_endpoint(config, run_date)
-    rows = flatten_response(payload, endpoint_name)
-    logger.info("Flattened %s -> %d row(s)", endpoint_name, len(rows))
+    documents = fetch_endpoint(config, run_date, _get_security_token())
+
+    rows: list[dict[str, Any]] = []
+    for document in documents:
+        rows.extend(flatten_document(document.body, endpoint_name, document.area))
+    logger.info("Flattened %s -> %d row(s) from %d document(s)", endpoint_name, len(rows), len(documents))
 
     result = upload_results(
         _s3_client,
@@ -42,7 +56,7 @@ def _run_one_endpoint(endpoint_name: str, run_date: date, bucket: str) -> dict[s
         s3_prefix=config["s3_prefix"],
         endpoint_name=endpoint_name,
         target_date=run_date + timedelta(days=config["date_offset_days"]),
-        raw_payload=payload,
+        raw_documents=[(document.area, document.body) for document in documents],
         rows=rows,
     )
     logger.info("Uploaded %s -> s3://%s/%s", endpoint_name, bucket, result["csv_key"])

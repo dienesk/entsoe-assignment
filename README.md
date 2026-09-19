@@ -6,6 +6,11 @@ Infrastructure is defined entirely in Terraform, with the Lambda's internet
 egress provided by [fck-nat](https://github.com/AndrewGuenther/fck-nat)
 instead of a managed NAT Gateway.
 
+Data comes from the platform's official [RESTful
+API](https://documenter.getpostman.com/view/7009892/2s93JtP3F6)
+(`web-api.tp.entsoe.eu`), which needs a security token — see
+[Before the first apply](#before-the-first-apply).
+
 ## Architecture
 
 ```
@@ -13,14 +18,15 @@ EventBridge (1 schedule per endpoint config)
         │  invokes with {"endpoint_name": "..."}
         ▼
    Lambda function  ───────────────►  SSM Parameter Store
-   (private subnet)   reads its           (one JSON config
-        │              endpoint config     per endpoint)
-        │ POST via fck-nat NAT instance (public subnet)
+   (private subnet)   reads its           ├─ one plain JSON config per endpoint
+        │              config +           └─ the API token (SecureString,
+        │              token                   created outside Terraform)
+        │ GET via fck-nat NAT instance (public subnet), one request per area
         ▼
- iop-transparency.entsoe.eu
-        │  JSON response
+ web-api.tp.entsoe.eu
+        │  XML market document
         ▼
-     data_processor   ──► CSV + raw JSON  ──►  S3 bucket
+     data_processor   ──► CSV + raw XML  ──►  S3 bucket
 ```
 
 - **Lambda** (`lambda/src/`) — Python 3.13, standard library + `boto3` only
@@ -32,12 +38,48 @@ EventBridge (1 schedule per endpoint config)
   module, per the task's stated preference. `ha_mode = false` by default to
   keep this cheap; flip it on in `terraform.tfvars` for production use.
 - **S3** (`terraform/modules/storage`) — private, versioned, encrypted
-  bucket. Flattened CSVs are kept indefinitely; raw JSON responses (kept for
-  reprocessing) expire after `s3_raw_json_expiration_days` (default 90).
+  bucket. Flattened CSVs are kept indefinitely; raw XML responses (kept for
+  reprocessing) expire after `s3_raw_response_expiration_days` (default 90).
 - **EventBridge + SSM** (`terraform/modules/scheduler`) — every file in
   [`lambda/config/endpoints/`](lambda/config/endpoints) becomes one SSM
   parameter (the config the Lambda reads at invocation time) and one
   scheduled EventBridge rule that invokes the Lambda for just that endpoint.
+
+## Before the first apply
+
+The API security token is the one thing Terraform does not create. It is
+written to a SecureString SSM parameter out of band, so the credential never
+enters `terraform.tfstate` — Terraform only grants the Lambda permission to
+read that parameter name, and a Terraform `data` source would have pulled the
+plaintext into state, which is exactly what this avoids.
+
+Get a token by [requesting API access from
+ENTSO-E](https://transparency.entsoe.eu/) (register, then email
+transparency@entsoe.eu asking for RESTful API access), then:
+
+```bash
+aws ssm put-parameter \
+  --name "/entsoe-scraper/dev/entsoe/security-token" \
+  --type SecureString \
+  --value "<your-token>" \
+  --region eu-central-1
+```
+
+Or, in the console: **Systems Manager → Parameter Store → Create
+parameter**, name `/entsoe-scraper/dev/entsoe/security-token`, tier Standard,
+type **SecureString**, KMS key source **My current account** with the default
+`alias/aws/ssm` key — that key is what the Lambda's `kms:Decrypt` grant is
+scoped to, so a parameter encrypted under a customer-managed key won't be
+readable without widening the policy in `terraform/modules/lambda/main.tf`.
+
+The name is `/<project>/<environment>/entsoe/security-token` by default, and
+is reported by the `security_token_parameter_name` output; override it with
+the `security_token_parameter_name` variable.
+
+The parameter can be created before or after `terraform apply` — the Lambda
+reads it at invocation time, so creating it later needs no redeploy and no
+re-apply, just another invoke. Rotating the token is the same command with
+`--overwrite`.
 
 ## Why a "generic" scraper, and what that means concretely
 
@@ -50,85 +92,103 @@ per-unit ships pre-written and verified under
 only asked for day-ahead to be scraped, and every live config file becomes a
 scheduled job that costs requests and storage.
 
-That split works because the two are different reports on the same platform
-returning the same JSON envelope shape
-(`instanceList[].businessDimensionMap` + `curveData.periodList[].pointMap`),
-confirmed by inspecting real traffic from both source pages — the captured
-per-unit response is kept as a test fixture precisely so the processing code
-is proven against a second, differently-shaped report. Two design decisions
-follow from that:
+That split works because the two are the same kind of document —
+`GL_MarketDocument` — differing only in their `documentType`/`processType`
+selectors and in which fields each `TimeSeries` carries. Two design
+decisions follow:
 
-1. **[`lambda/src/data_processor.py`](lambda/src/data_processor.py)** doesn't hard-code
-   column names. It derives dimension columns from whatever keys are in
-   `businessDimensionMap`, and metric columns from whatever keys are in
-   `pointAttributeVariabilityMap`, so if ENTSO-E adds/renames a dimension or
-   metric, the CSV's columns change accordingly instead of the scrape
-   breaking. Point values are looked for in order (`value`, then `alt`, then
-   a raw JSON dump as a last resort) so an unrecognized point shape degrades
-   gracefully. The raw JSON response is always kept alongside the CSV
-   specifically so a materially different future shape can be reprocessed
-   without re-scraping.
+1. **[`lambda/src/data_processor.py`](lambda/src/data_processor.py) doesn't
+   hard-code column names.** It walks the document and emits a column per
+   leaf element it finds: document-level fields become `doc_*`, per-series
+   fields (including nested ones like `MktPSRType/PowerSystemResources/name`)
+   become `ts_*`, and a point's non-`position` children become the metric
+   columns — `quantity` on a generation document, `price.amount` on a price
+   one. If ENTSO-E adds or renames a field, the CSV's columns change
+   accordingly instead of the scrape breaking. The raw XML is always kept
+   alongside the CSV specifically so a materially different future shape can
+   be reprocessed without re-scraping.
 2. **Adding a new endpoint is a configuration change, not a code change.**
    Drop a new JSON file in `lambda/config/endpoints/`, run `terraform
    apply`. See "Adding a new endpoint" below.
 
-### What I verified before building this, and one important caveat
+### Checking both claims for yourself
 
-The URLs given in the task (e.g.
-`.../generation/forecast/dayAhead?appState=...`) are not REST GET endpoints
-— they're deep links into a single-page app. Using a browser, I confirmed
-the page actually issues a `POST` to a companion endpoint:
+The two claims above — adapts to response-structure changes, extensible by
+configuration — are each pinned by a test file, so they can be checked
+without deploying anything:
 
-| Task URL | Real request |
-|---|---|
-| `.../generation/forecast/dayAhead` | `POST https://iop-transparency.entsoe.eu/generation/forecast/dayAhead/load` |
-| `.../generation/actual/perUnit` | `POST https://iop-transparency.entsoe.eu/generation/actual/perUnit/loadOverview` |
-
-There is no published schema for these endpoints, so the request body was
-recovered from the platform's own frontend: its webpack bundle ships
-**inline sourcemaps**, so the original source can be read directly. The
-authoritative builder is `getDtoInByOptions()` in
-`core/contexts/data-view-data-context-provider.js`, which assembles every
-data view's request identically:
-
-```json
-{
-  "dateTimeRange": { "from": "2025-12-31T23:00:00Z", "to": "2026-01-01T23:00:00Z" },
-  "areaList":      ["CTA|10YSK-SEPS-----K"],
-  "timeZone":      "CET",
-  "sorterList":    [],
-  "intervalPageInfo": { "itemIndex": 0, "pageSize": 100 }
-}
+```bash
+cd lambda && pytest tests/test_response_structure_changes.py tests/test_endpoint_extensibility.py -v
 ```
 
-Both endpoints were then verified live: day-ahead returns `200` with 24
-hourly points, per-unit returns `200` with 23 generation units. Because
-*every* data view uses this one builder, the same template shape works for
-any report on the platform — which is what makes the config-only
-extensibility real rather than aspirational.
+`test_response_structure_changes.py` takes real captured responses and
+mutates them the way ENTSO-E plausibly could — renaming a metric, adding one,
+removing a block, re-nesting a field, changing the resolution, adding a
+series with different fields — and asserts the CSV's columns follow instead
+of the run breaking or rows misaligning. Its strongest case uses a real
+`A44` day-ahead price response: a `Publication_MarketDocument` rather than a
+`GL_MarketDocument`, with a different namespace, a different document-level
+interval element and a `price.amount` metric where generation reports carry
+`quantity`. It flattens correctly with no code written for it.
 
-Three findings worth knowing before you add an endpoint:
+That file also marks the limit of the claim: a response that has stopped
+being a TimeSeries/Period/Point document is a genuine breaking change and
+raises `DocumentError`, because a scrape that silently writes an empty CSV
+every night is the worse failure.
 
-- **`areaList` is a list** of `"<AREA_TYPE>|<EIC>"` strings, not the
-  `businessDimensionMap` object that appears in the *response*. Request and
-  response shapes differ; don't infer one from the other.
-- **The WAF blocks `2147483647`.** The platform sits behind a Microsoft
-  Azure Application Gateway that rejects that exact literal (`Integer.MAX_VALUE`)
-  anywhere in the body with a `403 Forbidden` HTML page, as an
-  integer-overflow attack signature. `2147483646` passes. Keep `pageSize`
-  well below it — this costs hours to diagnose, because the 403 arrives
-  before the application and looks nothing like an application error. There
-  is a regression test pinning this.
-- **Per-unit posts to `/loadOverview`**, not `/load`. Most report endpoints
-  use `/load`; check the frontend's `calls` module for the exact command URI.
+`test_endpoint_extensibility.py` drives the shipped per-unit example config
+through config validation, the API client and the processing code, asserting
+no application code is touched on the way. To prove it end-to-end against
+AWS, enable that endpoint for real (below) and invoke the function.
 
-No authentication is required: an unauthenticated `GET` gets a clean
-`405 invalidInvocationMethod` from the app layer, not a 401/403.
+### What I verified, and the five things worth knowing
 
-If a template is ever wrong, the Lambda's CloudWatch Logs show either the
-HTTP error or the API's `uuAppErrorMap` verbatim (see
-[`api_client.py`](lambda/src/api_client.py)) — it's designed to fail
-loudly and specifically rather than silently write an empty CSV.
+Both endpoints were exercised against the live API before any of this was
+written: day-ahead (`A71`/`A01`) returns hourly generation forecasts,
+per-unit (`A73`/`A16`) returns 29 generation units for the Slovak zone. The
+trimmed fixtures in `lambda/tests/fixtures/` are those real responses.
+
+- **HTTP 200 does not mean data.** When a report exists but has nothing
+  published for the requested period, the API answers `200` with an
+  `Acknowledgement_MarketDocument` instead of the expected
+  `GL_MarketDocument`. Rejected requests use the *same* acknowledgement body
+  and the same `Reason` code (`999`) but a `4xx` status, so the status — not
+  the reason text — is the only reliable discriminator. The client branches
+  on it and raises a distinct `NoDataError`, because "the auction hasn't
+  closed yet" and "your query is wrong" need different responses from
+  whoever is on call.
+- **One area per request.** Unlike the web UI, the API takes a single domain
+  EIC per call, so an endpoint config listing three areas issues three
+  requests and stores three raw documents. They merge into one CSV,
+  distinguished by the `request_area` column.
+- **Resolution varies by area, in the same report.** Slovakia publishes
+  day-ahead forecasts at `PT60M`; Czechia publishes the same report at
+  `PT15M`, and adds a second `TimeSeries` for the out-zone. Nothing in the
+  processing assumes hourly data or a fixed series count — the time axis is
+  rebuilt per period from that period's own `resolution`.
+- **`curveType` `A03` means gaps are meaningful.** A "variable sized block"
+  series publishes a point only when the value *changes*; the previous value
+  holds until the next position. Emitting only published points would leave
+  holes in an otherwise regular series, so gaps are carried forward and
+  flagged in the `point_carried_forward` column — filter it out to get back
+  to exactly what was published.
+- **Each report has a maximum query period.** Day-ahead generation rejects
+  anything over `P1Y` with a `400`. Irrelevant for a daily scrape, but it is
+  what a backfill will hit first.
+
+Points carry a 1-based `position` and no timestamp, so each row's
+`timestamp_utc` is `period start + (position - 1) * resolution`.
+`periodStart`/`periodEnd` are UTC in `yyyyMMddHHmm` form, while a report's
+"day" is a *local* calendar day — so the CET day 2026-07-01 is
+`202606302200`..`202607012200` in summer and an hour later in winter.
+[`lambda/src/dates.py`](lambda/src/dates.py) owns that conversion and is the
+most heavily tested module here for that reason.
+
+If a request is ever wrong, the Lambda's CloudWatch Logs carry the API's own
+`Reason` code and text verbatim (see
+[`api_client.py`](lambda/src/api_client.py)) — it's designed to fail loudly
+and specifically rather than silently write an empty CSV. Request URLs are
+logged with the token redacted, since it travels as a query parameter.
 
 ## Repository layout
 
@@ -148,7 +208,9 @@ terraform/
 ## Deploying
 
 Prerequisites: Terraform >= 1.9, an AWS account/credentials with permission
-to create the resources above, Python 3.13 (for running tests locally).
+to create the resources above, Python 3.13 (for running tests locally), and
+the security token parameter from [Before the first
+apply](#before-the-first-apply).
 
 ```bash
 cd terraform
@@ -158,20 +220,69 @@ terraform plan
 terraform apply
 ```
 
-No pre-deploy steps needed: the shipped day-ahead config is verified against
-the live endpoint and returns real data as-is.
+### Smoke-testing the deployed function
 
-Smoke test after apply:
 ```bash
 aws lambda invoke --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
   --payload '{"endpoint_name": "generation_forecast_day_ahead"}' --cli-binary-format raw-in-base64-out \
   /tmp/out.json && cat /tmp/out.json
 ```
+
+From the console instead, use the function's **Test** tab with the same
+payload as the event JSON:
+
+```json
+{ "endpoint_name": "generation_forecast_day_ahead" }
+```
+
+Both accept an optional `run_date`, which is useful because day-ahead
+figures only exist once the auction has closed — pointing a test at a day
+that definitely has data avoids chasing a non-problem. Note it is the *run*
+date, not the target day: `date_offset_days` is applied on top, so a
+`run_date` of `2026-09-16` scrapes the CET day `2026-09-17`.
+
+```json
+{ "endpoint_name": "generation_forecast_day_ahead", "run_date": "2026-09-16" }
+```
+
+An empty event, `{}`, scrapes every endpoint configured in SSM — what the
+scheduled rules do when no endpoint is named.
+
+A successful run returns the keys it wrote and an empty `errors` list:
+
+```json
+{
+  "run_date": "2026-09-16",
+  "results": [
+    {
+      "endpoint_name": "generation_forecast_day_ahead",
+      "row_count": 24,
+      "csv_key": "generation/forecast/day-ahead/date=2026-09-17/generation_forecast_day_ahead_20260916T170014Z.csv",
+      "raw_keys": ["raw/generation/forecast/day-ahead/date=2026-09-17/generation_forecast_day_ahead_10YSK-SEPS-----K_20260916T170014Z.xml"]
+    }
+  ],
+  "errors": []
+}
+```
+
 Then check CloudWatch Logs for the function, and
 `s3://$(terraform -chdir=terraform output -raw output_bucket_name)/` for the
 CSV.
 
-To tear everything down: `terraform destroy` (from `terraform/`).
+Two failures are worth recognising on sight:
+
+| Error | Meaning |
+|---|---|
+| `ConfigError: No ENTSO-E security token at SSM parameter ...` | The step in [Before the first apply](#before-the-first-apply) hasn't been run. The message carries the exact `put-parameter` command; re-invoke once the parameter exists, with no redeploy. |
+| `NoDataError: ... 999: No matching data found ...` | The request was well-formed but the data isn't published for that period — usually a run that is simply early, which is why the shipped schedule is 17:00 UTC. Retry with an earlier `run_date`. |
+
+Because the Lambda keeps going when a single endpoint fails, a partial
+failure comes back as a `200` with entries in `errors` rather than as an
+invocation error; only an all-endpoints failure raises.
+
+To tear everything down: `terraform destroy` (from `terraform/`). The token
+parameter survives, since Terraform doesn't manage it; delete it with
+`aws ssm delete-parameter` if you want it gone.
 
 ## Adding a new endpoint
 
@@ -194,35 +305,61 @@ mv lambda/config/endpoints/examples/generation_actual_per_unit.json \
 terraform -chdir=terraform apply
 ```
 
-Its `request_template` is already verified against the live endpoint (200,
-23 generation units), so no payload capture is needed. Optionally add a
-schedule for it to `endpoint_schedules` in `terraform.tfvars`; otherwise it
-inherits `default_schedule_expression`.
+Its `query_template` is already verified against the live API, so no
+guesswork is needed. Optionally add a schedule for it to `endpoint_schedules`
+in `terraform.tfvars`; otherwise it inherits `default_schedule_expression`.
 
 `lambda/tests/test_endpoint_extensibility.py` pins this path: it checks the
 example config validates, drives the API client, and processes that
 endpoint's captured response — all without touching application code.
 
+### Choosing countries / areas
+
+`areas` is a top-level config field holding bare EIC codes, so widening
+coverage is a one-line edit — no template or code change:
+
+```json
+"areas": ["10YSK-SEPS-----K", "10YCZ-CEPS-----N"]
+```
+
+Each area gets its own request, and its rows are distinguished by the
+`request_area` column in the CSV.
+
+The default `10YSK-SEPS-----K` (Slovakia / SEPS) comes from the assignment's
+own URL — its `appState` parameter decodes to
+`{"sa":["CTA|10YSK-SEPS-----K"],"st":"CTA",...}`, where `sa` is the selected
+area list. Note the API wants the bare EIC, *not* the `CTA|` prefix the web
+UI uses; the config validator rejects the prefixed form with a message
+saying so.
+
+The authoritative EIC code list is Appendix A of the [API
+documentation](https://documenter.getpostman.com/view/7009892/2s93JtP3F6).
+One caveat: a valid code doesn't guarantee data for a given report — check a
+new area returns rows before relying on it.
+
 ### Any other endpoint
 
-1. Find the endpoint's command URI in the frontend's `calls` module (e.g.
-   `generation/forecast/windAndSolar/solar/load`) — or read it off the
-   Network tab. The request body shape is the same for all of them.
+1. Find the report's `documentType` and `processType` in the [API
+   documentation](https://documenter.getpostman.com/view/7009892/2s93JtP3F6),
+   along with which parameter carries the area (`in_Domain`,
+   `outBiddingZone_Domain`, `biddingZone_Domain`, ...).
 2. Create `lambda/config/endpoints/<new_endpoint_name>.json` following the
-   schema of `generation_forecast_day_ahead.json` (`endpoint_name`,
-   `method`, `url`, `timezone`, `date_offset_days`, `request_template`,
-   `s3_prefix`). An "actuals"-style endpoint wants a negative
-   `date_offset_days` so each run collects the day that just finished.
+   schema of `generation_forecast_day_ahead.json` (`endpoint_name`, `url`,
+   `timezone`, `date_offset_days`, `query_template`, `s3_prefix`, and
+   optionally `areas`). Put the selectors in `query_template` and use
+   `{area}` for whichever parameter carries the area —
+   `periodStart`/`periodEnd` are added automatically. An "actuals"-style
+   endpoint wants a negative `date_offset_days` so each run collects the day
+   that just finished.
 3. Optionally add a schedule override to `endpoint_schedules` in
    `terraform.tfvars`.
 4. `terraform apply`.
 
-No Python or Terraform code changes are needed as long as the new endpoint
-returns the same `instanceList`/`curveData`/`pointMap` envelope — which
-holds for every report on this platform built on the same uuApp
-business-report component. `lambda/tests/` includes a captured per-unit
-response as a fixture, so the processing code is already proven against
-that endpoint's differently-shaped payload.
+No Python or Terraform code changes are needed as long as the report returns
+a `TimeSeries`/`Period`/`Point` document, which holds for the whole
+`*_MarketDocument` family. The processing derives its columns from the
+document, so a report with different fields produces a CSV with different
+columns rather than an error.
 
 ## Local development
 

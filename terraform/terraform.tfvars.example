@@ -1,6 +1,12 @@
 # Copy to terraform.tfvars and adjust as needed. Every value here has a
 # default in variables.tf; this file only needs to override what you want
 # to change.
+#
+# The ENTSO-E API security token is deliberately NOT set here: it lives in a
+# SecureString SSM parameter created outside Terraform, so it stays out of
+# terraform.tfstate. See "Before the first apply" in the root README. Set
+# security_token_parameter_name below only if you want a name other than
+# /<project>/<environment>/entsoe/security-token.
 
 aws_region  = "eu-central-1"
 project     = "entsoe-scraper"

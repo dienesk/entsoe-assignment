@@ -1,111 +1,132 @@
-"""Tests for the response-to-rows processing, run against real captured API responses.
+"""Tests for the document-to-rows processing, run against real captured API responses.
 
-day_ahead_response.json and per_unit_response.json are trimmed copies of
-actual responses captured from the ENTSO-E Transparency Platform while
-researching this task (both endpoints happened to have no data yet for the
-sampled date, hence the "N/A"/"n/e" placeholders). populated_response.json
-is a synthetic, schema-conformant fixture used to exercise the "value"
-extraction path, since no captured sample had real numeric data.
+day_ahead_response.xml and per_unit_response.xml are trimmed copies of
+actual ENTSO-E API responses for the Slovak bidding zone (SK day-ahead
+forecast for 2026-09-17, per-unit actuals for 2026-09-15), cut down to a few
+points so the expected values can be written out by hand.
+variable_block_response.xml is synthetic: every captured response happened
+to publish a point at every position, so it is the only way to exercise the
+curveType A03 carry-forward path.
 """
 
-import json
 from pathlib import Path
 
 import pytest
 
-from data_processor import flatten_response
+from data_processor import DocumentError, flatten_document
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
-def load_fixture(name: str) -> dict:
-    return json.loads((FIXTURES_DIR / name).read_text())
+def load_fixture(name: str) -> bytes:
+    return (FIXTURES_DIR / name).read_bytes()
 
 
 def test_day_ahead_real_response_flattens_one_row_per_point():
-    payload = load_fixture("day_ahead_response.json")
+    rows = flatten_document(load_fixture("day_ahead_response.xml"), "generation_forecast_day_ahead", "10YSK-SEPS-----K")
 
-    rows = flatten_response(payload, "generation_forecast_day_ahead")
-
-    assert len(rows) == 3  # 3 points in the trimmed fixture's pointMap
+    assert len(rows) == 3  # 3 points in the trimmed fixture
     first = rows[0]
     assert first["endpoint_name"] == "generation_forecast_day_ahead"
-    assert first["dim_AREA"] == "CTA|10YSK-SEPS-----K"
-    assert first["timestamp_utc"] == "2025-12-31T23:00:00Z"
-    # metric columns come from pointAttributeVariabilityMap, in order
-    assert set(["SCHEDULED_CONSUMPTION", "GENERATION_FORECAST", "ACTUAL_GENERATION"]) <= first.keys()
-    assert first["GENERATION_FORECAST"] == "N/A"  # falls back to the "alt" key
-    # instanceAttributeMap surfaces as attr_ columns, kept as raw strings
-    assert first["attr_PRODUCTION_TYPE_LIST"].startswith("[\"B19\"")
+    assert first["request_area"] == "10YSK-SEPS-----K"
+    assert first["timestamp_utc"] == "2026-09-17T00:00:00Z"
+    assert first["quantity"] == "2197.9"
+    # document-level provenance, denormalized onto every row
+    assert first["doc_type"] == "A71"
+    assert first["doc_mRID"] == "263d0351ffeb4aeea98562c9764b9a04"
+    # TimeSeries metadata, named after the elements it came from
+    assert first["ts_inBiddingZone_Domain.mRID"] == "10YSK-SEPS-----K"
+    assert first["ts_quantity_Measure_Unit.name"] == "MAW"
 
 
-def test_timestamps_increment_by_the_resolution():
-    payload = load_fixture("day_ahead_response.json")
+def test_constant_platform_identifiers_are_dropped():
+    # sender/receiver are ENTSO-E itself on every document of every type;
+    # doc_mRID is what actually identifies the response a row came from.
+    rows = flatten_document(load_fixture("day_ahead_response.xml"), "generation_forecast_day_ahead")
 
-    rows = flatten_response(payload, "generation_forecast_day_ahead")
+    assert not [key for key in rows[0] if "MarketParticipant" in key]
+
+
+def test_timestamps_are_reconstructed_from_position_and_resolution():
+    # Points carry a 1-based position and no timestamp; the time axis has to
+    # be rebuilt from the period start and the resolution.
+    rows = flatten_document(load_fixture("day_ahead_response.xml"), "generation_forecast_day_ahead")
 
     assert [row["timestamp_utc"] for row in rows] == [
-        "2025-12-31T23:00:00Z",
-        "2026-01-01T00:00:00Z",
-        "2026-01-01T01:00:00Z",
+        "2026-09-17T00:00:00Z",
+        "2026-09-17T01:00:00Z",
+        "2026-09-17T02:00:00Z",
     ]
+    assert [row["point_position"] for row in rows] == [1, 2, 3]
 
 
-def test_per_unit_response_has_one_row_per_generation_unit():
-    # Per-unit does not ship as a configured endpoint (only day-ahead does),
-    # but its captured response is kept here as the evidence that the
-    # processing generalizes to a second, differently-shaped report --
-    # which is what makes it addable by configuration alone.
-    payload = load_fixture("per_unit_response.json")
+def test_per_unit_response_adds_generation_unit_columns_with_no_code_change():
+    # Per-unit is not a live config (only day-ahead is), but its captured
+    # response is kept here as evidence that the processing generalizes to a
+    # second, differently-shaped report -- which is what makes it addable by
+    # configuration alone.
+    rows = flatten_document(load_fixture("per_unit_response.xml"), "generation_actual_per_unit")
 
-    rows = flatten_response(payload, "generation_actual_per_unit")
-
-    assert len(rows) == 2
-    units = {row["dim_GENERATION_UNIT"] for row in rows}
-    assert units == {"24WG--EMOG31---P", "24WG--ENOG03---O"}
-    # a *different* dimension set than day-ahead -- same processor handles both
-    assert "dim_PRODUCTION_TYPE" in rows[0]
-    assert "ACTUAL_GENERATION_OUTPUT" in rows[0]
-
-
-def test_populated_points_prefer_value_over_alt():
-    payload = load_fixture("populated_response.json")
-
-    rows = flatten_response(payload, "generation_forecast_day_ahead")
-
-    assert rows[0]["GENERATION_FORECAST"] == 1234.5
-    assert rows[0]["SCHEDULED_CONSUMPTION"] == 987.0
-    # second point mixes a real value and a still-missing one in the same row
-    assert rows[1]["GENERATION_FORECAST"] == 1300.0
-    assert rows[1]["SCHEDULED_CONSUMPTION"] == "N/A"
+    assert len(rows) == 4  # 2 units x 2 points
+    units = {row["ts_MktPSRType.PowerSystemResources.name"] for row in rows}
+    assert units == {"Bohunice TG31", "Bohunice TG32"}
+    # dimensions day-ahead does not have, produced by the same code path
+    assert rows[0]["ts_MktPSRType.psrType"] == "B14"
+    assert rows[0]["ts_registeredResource.mRID"] == "24WV--EBO------8"
+    assert rows[0]["doc_type"] == "A73"
 
 
-def test_missing_instance_list_yields_no_rows():
-    assert flatten_response({}, "whatever") == []
+def test_variable_sized_blocks_carry_the_previous_value_forward():
+    # curveType A03 publishes a point only when the value changes, so
+    # positions 2 and 4 are absent and inherit 1 and 3.
+    rows = flatten_document(load_fixture("variable_block_response.xml"), "generation_forecast_day_ahead")
+
+    assert [(row["point_position"], row["quantity"]) for row in rows] == [
+        (1, "2197.9"),
+        (2, "2197.9"),
+        (3, "2204.5"),
+        (4, "2204.5"),
+    ]
+    # Filled values are flagged, so an analyst can always get back to exactly
+    # what was published.
+    assert [row["point_carried_forward"] for row in rows] == [False, True, False, True]
+
+
+def test_a_document_with_no_time_series_yields_no_rows():
+    empty = b'<?xml version="1.0"?><GL_MarketDocument><mRID>x</mRID></GL_MarketDocument>'
+
+    assert flatten_document(empty, "whatever") == []
+
+
+def test_malformed_xml_fails_loudly():
+    # Better a named error naming the endpoint than an empty CSV.
+    with pytest.raises(DocumentError):
+        flatten_document(b"<GL_MarketDocument><unclosed>", "generation_forecast_day_ahead")
 
 
 @pytest.mark.parametrize(
-    "from_instant",
-    ["2025-12-31T23:00:00Z", "2025-12-31T23:00:00.000Z", "2025-12-31T23:00:00+00:00"],
+    "start_instant",
+    ["2026-09-17T00:00Z", "2026-09-17T00:00:00Z", "2026-09-17T00:00:00.000Z", "2026-09-17T00:00+00:00"],
 )
-def test_period_start_accepts_iso8601_spelling_variants(from_instant):
-    # The platform is an undocumented internal API; a serializer change that
-    # starts emitting fractional seconds or a numeric offset must not take
-    # the whole scrape down.
-    payload = load_fixture("day_ahead_response.json")
-    payload["instanceList"][0]["curveData"]["periodList"][0]["timeInterval"]["from"] = from_instant
+def test_period_start_accepts_iso8601_spelling_variants(start_instant):
+    # The API currently omits seconds; a serializer change that starts
+    # emitting them (or a numeric offset) must not take the scrape down.
+    document = load_fixture("day_ahead_response.xml").decode()
+    document = document.replace("<start>2026-09-17T00:00Z</start>", f"<start>{start_instant}</start>")
 
-    rows = flatten_response(payload, "generation_forecast_day_ahead")
+    rows = flatten_document(document.encode(), "generation_forecast_day_ahead")
 
-    assert rows[0]["timestamp_utc"] == "2025-12-31T23:00:00Z"
+    assert rows[0]["timestamp_utc"] == "2026-09-17T00:00:00Z"
 
 
-@pytest.mark.parametrize("fixture_name", ["day_ahead_response.json", "per_unit_response.json"])
-def test_unknown_extra_keys_do_not_break_flattening(fixture_name):
-    payload = load_fixture(fixture_name)
-    payload["someBrandNewTopLevelField"] = {"nested": "value"}
-    payload["instanceList"][0]["someBrandNewInstanceField"] = "ignored"
+@pytest.mark.parametrize("fixture_name", ["day_ahead_response.xml", "per_unit_response.xml"])
+def test_unknown_extra_elements_become_columns_rather_than_breaking(fixture_name):
+    # The point of deriving columns from the document: a field ENTSO-E adds
+    # later shows up in the CSV instead of being dropped or crashing the run.
+    document = load_fixture(fixture_name).decode()
+    document = document.replace("<curveType>", "<someBrandNewField>surprise</someBrandNewField><curveType>", 1)
 
-    rows = flatten_response(payload, "x")
+    rows = flatten_document(document.encode(), "x")
 
+    assert rows[0]["ts_someBrandNewField"] == "surprise"
     assert len(rows) > 0
