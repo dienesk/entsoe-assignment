@@ -163,8 +163,8 @@ def test_all_endpoints_failing_raises(wired, monkeypatch):
 def test_an_unknown_endpoint_says_which_parameter_and_what_is_deployed(wired, monkeypatch):
     # boto3 raises ParameterNotFound with an empty message, so without this
     # the CloudWatch entry names neither the endpoint nor the parameter --
-    # which is exactly what you hit invoking an endpoint still sitting in
-    # config/endpoints/examples/.
+    # which is exactly what you hit invoking an endpoint whose config file
+    # exists locally but has not been applied yet.
     ssm, _ = wired
 
     def not_found(Name, WithDecryption=False):
@@ -182,4 +182,4 @@ def test_an_unknown_endpoint_says_which_parameter_and_what_is_deployed(wired, mo
     assert "generation_actual_per_unit" in error
     assert "/test/entsoe/endpoints/generation_actual_per_unit" in error
     assert "endpoint_a, endpoint_b" in error  # what is actually deployed
-    assert "examples/" in error
+    assert "terraform apply" in error

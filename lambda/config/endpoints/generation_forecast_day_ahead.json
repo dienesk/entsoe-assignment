@@ -13,6 +13,7 @@
   "query_template": {
     "documentType": "A71",
     "processType": "A01",
+    "psrType": "B14",
     "in_Domain": "{area}"
   }
 }

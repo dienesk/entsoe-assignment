@@ -94,14 +94,13 @@ def load_endpoint_config_from_ssm(endpoint_name: str, ssm_client, prefix: str | 
         # boto3 raises this one with an empty message, so an unhandled
         # ParameterNotFound reaches CloudWatch naming neither the parameter
         # nor the endpoint. The usual cause is invoking an endpoint whose
-        # config still sits in config/endpoints/examples/, which Terraform
-        # deliberately does not discover -- so say that, and say what is
-        # actually deployed.
+        # config file exists locally but hasn't been applied yet -- so say
+        # that, and say what is actually deployed.
         raise ConfigError(
             f"No config for endpoint {endpoint_name!r} at SSM parameter {param_name!r}. "
             f"Deployed endpoints: {_describe_available(ssm_client, prefix)}. "
-            "A config only deploys from lambda/config/endpoints/ itself (not examples/); "
-            "move the file there and run 'terraform apply'."
+            "A config reaches the Lambda only via 'terraform apply', which writes "
+            "each lambda/config/endpoints/*.json file to its own SSM parameter."
         ) from exc
     return validate_endpoint_config(json.loads(response["Parameter"]["Value"]))
 

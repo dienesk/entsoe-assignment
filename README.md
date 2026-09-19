@@ -85,14 +85,16 @@ re-apply, just another invoke. Rotating the token is the same command with
 
 The task asks for day-ahead generation forecast to be scraped, and for
 adding the actual-generation-per-unit endpoint later to be a matter of
-configuration rather than code. So day-ahead is the only *live* config;
-per-unit ships pre-written and verified under
-`lambda/config/endpoints/examples/`, and is enabled by moving one file (see
-"Adding a new endpoint"). It isn't live by default simply because the task
-only asked for day-ahead to be scraped, and every live config file becomes a
-scheduled job that costs requests and storage.
+configuration rather than code. Three endpoints now ship live, each one a
+single JSON file and no application code:
 
-That split works because the two are the same kind of document —
+| Config | Report | Verified |
+|---|---|---|
+| `generation_forecast_day_ahead.json` | Day-ahead aggregated generation, `A71`/`A01` (article 14.1.C) | 24 hourly points, SK |
+| `generation_actual_per_unit.json` | Actual generation per unit, `A73`/`A16` (article 16.1.A) | 29 generation units, SK |
+| `load_actual_total.json` | Actual total load, `A65`/`A16` (article 6.1.A) | 96 quarter-hourly points, SK |
+
+That works because they are the same kind of document —
 `GL_MarketDocument` — differing only in their `documentType`/`processType`
 selectors and in which fields each `TimeSeries` carries. Two design
 decisions follow:
@@ -245,6 +247,14 @@ The security token travels as a query parameter, so every URL is redacted
 structured field. `lambda/tests/test_logging.py` pins that, along with the
 level-ownership rule and the `extra` keys each path emits.
 
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [entsoe.MD](entsoe.MD) | The data domain: what the platform publishes, EIC codes and area types, the market-document model, the report catalogue, and the behaviours that will surprise you |
+| [lambda-doc.MD](lambda-doc.MD) | The application: every module, class and function, the config schema, the error taxonomy |
+| [infrastructure.MD](infrastructure.MD) | The Terraform: every variable, each module's resources, secrets handling, and why this uses fck-nat rather than a NAT Gateway |
+
 ## Repository layout
 
 ```
@@ -275,65 +285,127 @@ terraform plan
 terraform apply
 ```
 
-### Smoke-testing the deployed function
+### Testing the endpoints in the AWS console
 
-```bash
-aws lambda invoke --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
-  --payload '{"endpoint_name": "generation_forecast_day_ahead"}' --cli-binary-format raw-in-base64-out \
-  /tmp/out.json && cat /tmp/out.json
-```
+Open the function (`entsoe-scraper-dev-scraper`) → **Test** tab → paste one
+of the events below → **Test**. Each event scrapes exactly one endpoint.
 
-From the console instead, use the function's **Test** tab with the same
-payload as the event JSON:
+`run_date` is the **run** date, not the day fetched: each config's
+`date_offset_days` is applied on top. Omit it and it defaults to today (UTC),
+which is what the schedule does — but for a manual test, pinning a date you
+know has data separates "my change is broken" from "this data isn't
+published yet".
 
-```json
-{ "endpoint_name": "generation_forecast_day_ahead" }
-```
-
-Both accept an optional `run_date`, which is useful because day-ahead
-figures only exist once the auction has closed — pointing a test at a day
-that definitely has data avoids chasing a non-problem. Note it is the *run*
-date, not the target day: `date_offset_days` is applied on top, so a
-`run_date` of `2026-09-16` scrapes the CET day `2026-09-17`.
+#### 1. Day-ahead generation forecast
 
 ```json
-{ "endpoint_name": "generation_forecast_day_ahead", "run_date": "2026-09-16" }
+{ "endpoint_name": "generation_forecast_day_ahead", "run_date": "2026-09-19" }
 ```
 
-An empty event, `{}`, scrapes every endpoint configured in SSM — what the
-scheduled rules do when no endpoint is named.
+Offset `+1`, so this fetches **2026-09-20**. Expect **24 rows** for Slovakia
+— one hourly point per CET day.
 
-A successful run returns the keys it wrote and an empty `errors` list:
+Leaving `run_date` out fetches *tomorrow*, which only exists once the
+day-ahead auction has closed. Verified: on the morning of 2026-09-20 a run
+for 2026-09-21 returned `NoDataError`, while 2026-09-20 returned a full 24
+points. This is exactly why the shipped schedule is 17:00 UTC.
+
+#### 2. Actual generation per unit
+
+```json
+{ "endpoint_name": "generation_actual_per_unit", "run_date": "2026-09-19" }
+```
+
+Offset `-1`, so this fetches **2026-09-18**. Expect **696 rows** — 24 hourly
+points for each Slovak generation unit, with the unit names arriving as
+`ts_MktPSRType.PowerSystemResources.name` columns.
+
+**This report lags by about two days.** Verified on 2026-09-20: the previous
+day (2026-09-19) returned `NoDataError`, while 2026-09-18 and earlier
+returned complete data. For a manual test, target three days back and you
+will not be chasing a phantom.
+
+#### 3. Actual total load
+
+```json
+{ "endpoint_name": "load_actual_total", "run_date": "2026-09-19" }
+```
+
+Offset `-1`, so this fetches **2026-09-18**. Expect **96 rows** — Slovak load
+is published **quarter-hourly**, not hourly, which is a good reminder that
+resolution is a property of the report and the area, never an assumption.
+
+The most recent day may be partial: on 2026-09-20, the previous day returned
+92 of 96 points while older days returned all 96.
+
+#### All three at once
+
+```json
+{}
+```
+
+An empty event scrapes every endpoint configured in SSM — what a scheduled
+rule does when no endpoint is named. Useful as one check that all three are
+deployed and the token works.
+
+Expect a **partial** result rather than a clean pass: with default dates,
+day-ahead may be too early and per-unit too recent. That is the correct
+behaviour — one endpoint's failure does not sink the others, so you get a
+`200` with entries in `errors`. Only an all-endpoints failure raises.
+
+### Reading the result
+
+A successful endpoint reports the keys it wrote:
 
 ```json
 {
-  "run_date": "2026-09-16",
+  "run_date": "2026-09-19",
   "results": [
     {
       "endpoint_name": "generation_forecast_day_ahead",
       "row_count": 24,
-      "csv_key": "generation/forecast/day-ahead/date=2026-09-17/generation_forecast_day_ahead_20260916T170014Z.csv",
-      "raw_keys": ["raw/generation/forecast/day-ahead/date=2026-09-17/generation_forecast_day_ahead_10YSK-SEPS-----K_20260916T170014Z.xml"]
+      "target_date": "2026-09-20",
+      "document_count": 1,
+      "duration_ms": 412,
+      "csv_key": "generation/forecast/day-ahead/date=2026-09-20/generation_forecast_day_ahead_20260919T170014Z.csv",
+      "raw_keys": ["raw/generation/forecast/day-ahead/date=2026-09-20/generation_forecast_day_ahead_10YSK-SEPS-----K_20260919T170014Z.xml"]
     }
   ],
   "errors": []
 }
 ```
 
-Then check CloudWatch Logs for the function, and
-`s3://$(terraform -chdir=terraform output -raw output_bucket_name)/` for the
-CSV.
+`row_count: 0` on a run that otherwise succeeded is the case worth watching —
+it means a document arrived with no points in it.
 
-Two failures are worth recognising on sight:
+Then check **CloudWatch → Logs Insights** on the function's log group. Logs
+are JSON, so the fields are queryable directly:
+
+```
+fields @timestamp, endpoint_name, area, period_start, period_end, row_count, duration_ms
+| sort @timestamp desc | limit 20
+```
+
+`period_start`/`period_end` show the window actually requested, which
+answers most "why is this empty" questions. Finally, the CSV lands in the
+output bucket under each endpoint's `s3_prefix`
+(`generation/forecast/day-ahead/`, `generation/actual/per-unit/`,
+`load/actual/total/`).
+
+### The two errors you are most likely to see
 
 | Error | Meaning |
 |---|---|
-| `ConfigError: No ENTSO-E security token at SSM parameter ...` | The step in [Before the first apply](#before-the-first-apply) hasn't been run. The message carries the exact `put-parameter` command; re-invoke once the parameter exists, with no redeploy. |
-| `NoDataError: ... 999: No matching data found ...` | The request was well-formed but the data isn't published for that period — usually a run that is simply early, which is why the shipped schedule is 17:00 UTC. Retry with an earlier `run_date`. |
+| `NoDataError: ... 999: No matching data found ...` | Request was well-formed; the data isn't published for that period. Not a bug — adjust `run_date` as described above. Logged at `WARNING`, not `ERROR` |
+| `ConfigError: No config for endpoint '...'` | The config file exists locally but hasn't been applied. The message lists what *is* deployed. Run `terraform apply` |
 
-Because the Lambda keeps going when a single endpoint fails, a partial
-failure comes back as a `200` with entries in `errors` rather than as an
-invocation error; only an all-endpoints failure raises.
+### From the CLI instead
+
+```bash
+aws lambda invoke --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --payload '{"endpoint_name": "generation_forecast_day_ahead", "run_date": "2026-09-19"}' \
+  --cli-binary-format raw-in-base64-out /tmp/out.json && cat /tmp/out.json
+```
 
 To tear everything down: `terraform destroy` (from `terraform/`). The token
 parameter survives, since Terraform doesn't manage it; delete it with
@@ -343,30 +415,28 @@ parameter survives, since Terraform doesn't manage it; delete it with
 
 Any `*.json` file directly inside `lambda/config/endpoints/` is a live
 endpoint: Terraform discovers it and creates its SSM parameter, EventBridge
-rule and invoke permission automatically. Files in
-`lambda/config/endpoints/examples/` are deliberately **not** discovered
-(the discovery glob is non-recursive), so an example can sit there ready to
-use without deploying a job.
-
-### Turning on actual generation per unit
-
-This is the endpoint the task asks to be addable by configuration, and it
-ships pre-written as an example — enabling it is a file move plus an apply,
-with no code change:
+rule and invoke permission automatically. Adding one is a file plus an
+apply — no Python, no Terraform:
 
 ```bash
-mv lambda/config/endpoints/examples/generation_actual_per_unit.json \
-   lambda/config/endpoints/
+cp lambda/config/endpoints/load_actual_total.json \
+   lambda/config/endpoints/load_forecast_day_ahead.json
+# edit documentType/processType, s3_prefix, date_offset_days
 terraform -chdir=terraform apply
 ```
 
-Its `query_template` is already verified against the live API, so no
-guesswork is needed. Optionally add a schedule for it to `endpoint_schedules`
-in `terraform.tfvars`; otherwise it inherits `default_schedule_expression`.
+Optionally add a schedule to `endpoint_schedules` in `terraform.tfvars`;
+otherwise it inherits `default_schedule_expression` (05:00 UTC).
 
-`lambda/tests/test_endpoint_extensibility.py` pins this path: it checks the
-example config validates, drives the API client, and processes that
-endpoint's captured response — all without touching application code.
+`lambda/tests/test_endpoint_extensibility.py` pins this path. Its strongest
+case builds a config for a report that exists in no file in this repo —
+day-ahead prices, a different document family entirely — and processes a
+real response from it. If adding an endpoint needed a code change, that test
+could not pass.
+
+See [entsoe.MD](entsoe.MD) for the report catalogue (document types, process
+types, and which parameter each report scopes its area with), all harvested
+from the live API.
 
 ### Choosing countries / areas
 
