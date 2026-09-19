@@ -58,6 +58,28 @@ variable "lambda_log_retention_days" {
   default     = 30
 }
 
+variable "lambda_application_log_level" {
+  description = "Level below which the function's own log records are dropped by Lambda rather than billed and stored. Set here rather than in code: AWS's guidance for JSON-formatted logs is to control the level through advanced logging controls, and a setLevel() call in the handler would override whatever is deployed."
+  type        = string
+  default     = "INFO"
+
+  validation {
+    condition     = contains(["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"], var.lambda_application_log_level)
+    error_message = "Must be one of TRACE, DEBUG, INFO, WARN, ERROR, FATAL."
+  }
+}
+
+variable "lambda_system_log_level" {
+  description = "Level for the Lambda runtime's own records (START/END/REPORT lines are always emitted regardless). WARN keeps routine runtime chatter out of the log group without hiding runtime problems."
+  type        = string
+  default     = "WARN"
+
+  validation {
+    condition     = contains(["DEBUG", "INFO", "WARN"], var.lambda_system_log_level)
+    error_message = "Must be one of DEBUG, INFO, WARN."
+  }
+}
+
 variable "s3_raw_response_expiration_days" {
   description = "Days after which raw XML responses (kept for reprocessing) are expired from S3. The flattened CSVs are kept indefinitely."
   type        = number

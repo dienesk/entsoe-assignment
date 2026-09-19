@@ -147,12 +147,25 @@ resource "aws_lambda_function" "scraper" {
     security_group_ids = [aws_security_group.lambda.id]
   }
 
+  # AWS advanced logging controls. JSON format makes the runtime emit each
+  # record as a structured object (timestamp, level, message, logger,
+  # requestId) and is what lets Lambda filter by level at all -- level
+  # filtering does not work with the plain-text format. With this set, the
+  # level belongs here and not in a setLevel() call, which is why the
+  # function's environment deliberately carries no LOG_LEVEL: code that set
+  # it would silently override whatever is deployed.
+  logging_config {
+    log_format            = "JSON"
+    application_log_level = var.application_log_level
+    system_log_level      = var.system_log_level
+    log_group             = aws_cloudwatch_log_group.lambda.name
+  }
+
   environment {
     variables = {
       OUTPUT_BUCKET            = var.output_bucket_name
       SSM_CONFIG_PREFIX        = var.ssm_config_prefix
       SECURITY_TOKEN_PARAMETER = var.security_token_parameter_name
-      LOG_LEVEL                = "INFO"
     }
   }
 

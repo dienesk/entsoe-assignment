@@ -44,6 +44,16 @@ variable "log_retention_days" {
   type = number
 }
 
+variable "application_log_level" {
+  description = "Level for logs emitted by the function's own code, applied by Lambda's advanced logging controls."
+  type        = string
+}
+
+variable "system_log_level" {
+  description = "Level for logs emitted by the Lambda runtime itself."
+  type        = string
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

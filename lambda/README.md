@@ -34,6 +34,12 @@ token redaction with `urlopen` monkeypatched, so no network call is made.
 | `data_processor.py` | XML document → row-dicts: rebuilds the time axis from `position` + `resolution`, carries `curveType` A03 blocks forward, denormalizes document/series metadata, derives every column from the document (see the root README for the design rationale) |
 | `csv_writer.py` | Row-dicts → CSV bytes; uploads the merged CSV plus each area's raw XML to S3 |
 
+Logging is the standard library's, with context passed in `extra` so Lambda's
+JSON log format renders it as queryable top-level fields — see "Logging" in
+the root README. Locally the records print as plain text unless you install a
+JSON formatter yourself; set `LOG_LEVEL` to change the level, which in
+deployment is owned by Terraform instead.
+
 Output layout in the bucket — raw responses sit under one fixed top-level
 prefix so the bucket's `expire-raw-responses` lifecycle rule can select them,
 since S3 lifecycle filters only match a fixed prefix (or a tag). One CSV per

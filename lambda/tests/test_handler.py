@@ -7,21 +7,12 @@ endpoint doesn't take the others down.
 """
 
 import json
-import sys
-import types
 from pathlib import Path
 
 import pytest
 
-# boto3 ships with the Lambda runtime rather than with this repo, and
-# handler.py creates its clients at import time.
-if "boto3" not in sys.modules:
-    fake_boto3 = types.ModuleType("boto3")
-    fake_boto3.client = lambda service_name: None
-    sys.modules["boto3"] = fake_boto3
-
-import api_client  # noqa: E402
-import handler  # noqa: E402
+import api_client
+import handler
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "endpoints" / "generation_forecast_day_ahead.json"

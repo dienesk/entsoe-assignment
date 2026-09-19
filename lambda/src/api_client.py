@@ -24,6 +24,12 @@ The security token is a credential: it is passed as a query parameter, which
 means it would otherwise end up in log lines and exception messages. Every
 URL that leaves this module via a log or an exception goes through
 ``_redact`` first.
+
+Log records here carry their context in ``extra`` rather than only in the
+message, because the function runs with AWS's JSON log format: those keys
+become top-level JSON fields, so a retry storm can be counted by
+``endpoint_name`` and ``status`` in CloudWatch Logs Insights instead of
+parsed back out of prose.
 """
 
 from __future__ import annotations
@@ -119,9 +125,11 @@ def _fetch_one(url: str, endpoint_name: str, area: str | None) -> bytes:
     identically every time and the reason text is more useful now than three
     attempts later.
     """
+    context = {"endpoint_name": endpoint_name, "area": area}
     last_error: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         request = urllib.request.Request(url, method="GET", headers={"Accept": "application/xml"})
+        started = time.perf_counter()
         try:
             with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
                 body = response.read()
@@ -133,15 +141,36 @@ def _fetch_one(url: str, endpoint_name: str, area: str | None) -> bytes:
                     f"[{endpoint_name}] area={area}: request rejected with HTTP {status} -- {_reason(body)}"
                 ) from exc
             last_error = exc
-            logger.warning("[%s] HTTP %s on attempt %d/%d, retrying", endpoint_name, status, attempt, _MAX_ATTEMPTS)
+            logger.warning(
+                "[%s] HTTP %s on attempt %d/%d, retrying",
+                endpoint_name,
+                status,
+                attempt,
+                _MAX_ATTEMPTS,
+                extra={**context, "status": status, "attempt": attempt, "max_attempts": _MAX_ATTEMPTS},
+            )
         except urllib.error.URLError as exc:
             last_error = exc
             logger.warning(
-                "[%s] network error on attempt %d/%d: %s", endpoint_name, attempt, _MAX_ATTEMPTS, _redact(str(exc))
+                "[%s] network error on attempt %d/%d: %s",
+                endpoint_name,
+                attempt,
+                _MAX_ATTEMPTS,
+                _redact(str(exc)),
+                extra={**context, "attempt": attempt, "max_attempts": _MAX_ATTEMPTS},
             )
         else:
+            duration_ms = round((time.perf_counter() - started) * 1000)
             if _ACKNOWLEDGEMENT_ROOT in body[:500]:
                 raise NoDataError(f"[{endpoint_name}] area={area}: no data published -- {_reason(body)}")
+            logger.info(
+                "[%s] area=%s: %d byte(s) in %d ms",
+                endpoint_name,
+                area,
+                len(body),
+                duration_ms,
+                extra={**context, "status": status, "attempt": attempt, "response_bytes": len(body), "duration_ms": duration_ms},
+            )
             return body
 
         time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
@@ -160,6 +189,19 @@ def fetch_endpoint(config: dict[str, Any], run_date: date, security_token: str) 
     for area in areas:
         params = build_query_params(config, run_date, area)
         url = f"{config['url']}?{urllib.parse.urlencode({**params, 'securityToken': security_token})}"
-        logger.info("[%s] GET %s", endpoint_name, _redact(url))
+        logger.info(
+            "[%s] GET %s",
+            endpoint_name,
+            _redact(url),
+            # periodStart/periodEnd are the fields worth having as their own
+            # keys: nearly every "why is this empty" question is a question
+            # about the window that was actually requested.
+            extra={
+                "endpoint_name": endpoint_name,
+                "area": area,
+                "period_start": params.get("periodStart"),
+                "period_end": params.get("periodEnd"),
+            },
+        )
         documents.append(FetchedDocument(area=area, body=_fetch_one(url, endpoint_name, area)))
     return documents

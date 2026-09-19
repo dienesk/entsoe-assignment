@@ -51,7 +51,10 @@ module "lambda" {
   timeout_seconds    = var.lambda_timeout_seconds
   memory_mb          = var.lambda_memory_mb
   log_retention_days = var.lambda_log_retention_days
-  tags               = local.common_tags
+
+  application_log_level = var.lambda_application_log_level
+  system_log_level      = var.lambda_system_log_level
+  tags                  = local.common_tags
 }
 
 module "scheduler" {

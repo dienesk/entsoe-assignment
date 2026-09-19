@@ -190,6 +190,61 @@ If a request is ever wrong, the Lambda's CloudWatch Logs carry the API's own
 and specifically rather than silently write an empty CSV. Request URLs are
 logged with the token redacted, since it travels as a query parameter.
 
+## Logging
+
+The function uses [AWS advanced logging
+controls](https://docs.aws.amazon.com/lambda/latest/dg/python-logging.html):
+Terraform sets `log_format = "JSON"`, so the runtime emits every record from
+the standard `logging` module as a structured object carrying `timestamp`,
+`level`, `message`, `logger` and `requestId` — no formatting code, no
+`print`, and no logging dependency in the deployment package.
+
+Context travels in `extra`, which Lambda promotes to top-level JSON keys, so
+the facts you would actually query on are fields rather than prose:
+
+```json
+{"timestamp":"2026-09-16T17:00:04.112Z","level":"INFO","logger":"handler",
+ "requestId":"3bcf5fb6-4870-4e09-a471-37a1c6882d30",
+ "message":"Scraped generation_forecast_day_ahead: 24 row(s) -> s3://...",
+ "endpoint_name":"generation_forecast_day_ahead","target_date":"2026-09-17",
+ "document_count":1,"row_count":24,"duration_ms":412,"csv_key":"...","raw_keys":["..."]}
+```
+
+Which makes the questions worth asking one-liners in CloudWatch Logs
+Insights — for example, spotting a run that "succeeded" while writing
+nothing:
+
+```
+fields @timestamp, endpoint_name, row_count, duration_ms
+| filter ispresent(row_count) and row_count = 0
+| sort @timestamp desc
+```
+
+Three deliberate choices behind that:
+
+- **The log level lives on the function, not in code.** AWS's guidance is
+  that with JSON logs you set the level through `application_log_level`
+  rather than `setLevel()`, since code would silently override whatever is
+  deployed — so `lambda_application_log_level` (default `INFO`) is a
+  Terraform variable, the function's environment carries no `LOG_LEVEL`, and
+  the handler only calls `setLevel` when `LOG_LEVEL` *is* set, which is the
+  local-development path. Level filtering is also the reason JSON format
+  matters: Lambda cannot filter plain-text logs by level at all, so raising
+  the level to `WARN` in a chattier environment genuinely stops those records
+  being billed and stored. `lambda_system_log_level` (default `WARN`) covers
+  the runtime's own records.
+- **"No data yet" logs at `WARNING`, real failures at `ERROR`.** Day-ahead
+  figures only exist once the auction closes, so an early run is routine;
+  logging it as `ERROR` would train whoever owns the alarm to ignore `ERROR`.
+- **Failures use `logger.exception`,** which gives the JSON record
+  `stackTrace`, `errorType` and `errorMessage` keys, so a traceback stays
+  queryable instead of arriving as untagged text.
+
+The security token travels as a query parameter, so every URL is redacted
+(`securityToken=***`) before it reaches a log line, an exception message or a
+structured field. `lambda/tests/test_logging.py` pins that, along with the
+level-ownership rule and the `extra` keys each path emits.
+
 ## Repository layout
 
 ```
