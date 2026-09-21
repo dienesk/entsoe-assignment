@@ -1,0 +1,100 @@
+name: CI
+
+# Runs on every push and every pull request. The suite is fast (73 tests in
+# well under a second) and needs no credentials, so there is no reason to
+# restrict it to particular branches.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Matches the runtime the function is deployed on (see
+  # terraform/modules/lambda/main.tf), so CI fails on anything that would
+  # only fail in Lambda.
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: lambda/requirements.txt
+
+      - name: Install test dependencies
+        run: pip install -r lambda/requirements.txt
+
+      - name: Run pytest
+        working-directory: lambda
+        # No network, no AWS, no credentials: fixtures are captured ENTSO-E
+        # responses and every AWS client is faked.
+        run: python -m pytest -v
+
+  package:
+    name: Deployment package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Byte-compile the Lambda source
+        run: python -m compileall -q lambda/src
+
+      - name: Import the handler against the real boto3
+        working-directory: lambda/src
+        env:
+          # boto3 needs a region to construct a client; it does not need
+          # credentials, and none are used.
+          AWS_DEFAULT_REGION: eu-central-1
+        # The test suite stubs boto3 (the Lambda runtime provides it, this
+        # repo does not vendor it), so nothing else checks that the real
+        # import works. This is the step that would catch a boto3 API that
+        # moved, or a module-scope call that fails outside the fake.
+        run: |
+          pip install --quiet boto3
+          python -c "import handler; print('handler imported successfully')"
+
+      - name: Verify the package zips as Terraform builds it
+        # Mirrors the archive_file data source: lambda/src, as-is, no build
+        # step and no bundled dependencies.
+        run: |
+          cd lambda/src
+          zip -qr "$RUNNER_TEMP/lambda_package.zip" . -x '__pycache__/*' '*/__pycache__/*'
+          ls -lh "$RUNNER_TEMP/lambda_package.zip"
+          unzip -l "$RUNNER_TEMP/lambda_package.zip" | grep -q 'handler.py' \
+            && echo "handler.py present at the package root"
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9"
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      - name: Initialise without a backend
+        # -backend=false skips state entirely: this job validates
+        # configuration, it never touches AWS and needs no credentials.
+        run: terraform init -backend=false
+
+      - name: Validate
+        run: terraform validate

@@ -254,6 +254,7 @@ level-ownership rule and the `extra` keys each path emits.
 | [entsoe.MD](entsoe.MD) | The data domain: what the platform publishes, EIC codes and area types, the market-document model, the report catalogue, and the behaviours that will surprise you |
 | [lambda-doc.MD](lambda-doc.MD) | The application: every module, class and function, the config schema, the error taxonomy |
 | [infrastructure.MD](infrastructure.MD) | The Terraform: every variable, each module's resources, secrets handling, and why this uses fck-nat rather than a NAT Gateway |
+| [patterns.MD](patterns.MD) | Inventory of the language constructs, design patterns and conventions used — including what is deliberately absent |
 
 ## Repository layout
 
@@ -485,6 +486,23 @@ a `TimeSeries`/`Period`/`Point` document, which holds for the whole
 `*_MarketDocument` family. The processing derives its columns from the
 document, so a report with different fields produces a CSV with different
 columns rather than an error.
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
+pull request. No AWS credentials are needed or used — three jobs, all
+offline:
+
+| Job | Checks |
+|---|---|
+| **Unit tests** | `pytest` on Python 3.13, the same version the function is deployed on |
+| **Deployment package** | Byte-compiles `lambda/src`, imports the handler against the **real** `boto3`, and zips the package the way Terraform's `archive_file` does |
+| **Terraform** | `fmt -check -recursive`, `init -backend=false`, `validate` |
+
+The middle job earns its place: the test suite stubs `boto3` (the Lambda
+runtime provides it, this repo doesn't vendor it), so nothing else would
+notice a real import breaking. `-backend=false` means the Terraform job
+validates configuration without touching state or AWS.
 
 ## Local development
 
