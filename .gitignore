@@ -1,0 +1,23 @@
+# Terraform
+terraform/.terraform/
+terraform/**/build/
+terraform/terraform.tfvars
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# JetBrains IDEs
+.idea/

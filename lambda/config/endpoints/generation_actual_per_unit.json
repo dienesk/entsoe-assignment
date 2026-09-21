@@ -1,0 +1,18 @@
+{
+  "endpoint_name": "generation_actual_per_unit",
+  "description": "Actual generation per generation unit (ENTSO-E article 16.1.A) for the Slovak (SEPS) bidding zone.",
+  "url": "https://web-api.tp.entsoe.eu/api",
+  "timezone": "CET",
+  "date_offset_days": -1,
+  "s3_prefix": "generation/actual/per-unit",
+  "_areas_note": "Same bare-EIC form as every other endpoint; see the day-ahead config.",
+  "areas": [
+    "10YSK-SEPS-----K"
+  ],
+  "_query_template_note": "Verified against the live API (HTTP 200, 29 generation units for 2026-09-15). Differs from day-ahead only in documentType/processType -- the per-unit breakdown arrives as extra ts_MktPSRType.* columns derived from the response, with no code change.",
+  "query_template": {
+    "documentType": "A73",
+    "processType": "A16",
+    "in_Domain": "{area}"
+  }
+}

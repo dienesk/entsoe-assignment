@@ -1,0 +1,18 @@
+{
+  "endpoint_name": "load_actual_total",
+  "description": "Actual total load (ENTSO-E article 6.1.A) for the Slovak (SEPS) bidding zone.",
+  "url": "https://web-api.tp.entsoe.eu/api",
+  "timezone": "CET",
+  "date_offset_days": -1,
+  "s3_prefix": "load/actual/total",
+  "_areas_note": "Same bare-EIC form as every other endpoint; see the day-ahead config.",
+  "areas": [
+    "10YSK-SEPS-----K"
+  ],
+  "_query_template_note": "Load reports scope the area with outBiddingZone_Domain, NOT the in_Domain that generation reports use -- sending in_Domain here returns HTTP 400 'Mandatory parameter outBiddingZone_Domain is missing'. That the parameter name differs per report is exactly why {area} lives in this template rather than in code. Verified against the live API (HTTP 200).",
+  "query_template": {
+    "documentType": "A65",
+    "processType": "A16",
+    "outBiddingZone_Domain": "{area}"
+  }
+}
